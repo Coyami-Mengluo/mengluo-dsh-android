@@ -10,7 +10,7 @@ assert.ok(['x86_64', 'arm64-v8a'].includes(abi))
 const arm = abi === 'arm64-v8a'
 const variant = process.argv[3] ?? 'debug'
 assert.ok(['debug', 'release'].includes(variant))
-const apk = resolve(root, `app/${arm ? 'build-arm64' : 'build'}/outputs/apk/${variant}/app-${variant}.apk`)
+const apk = resolve(root, variant === 'release' ? `dist/staging/${abi}/app-release.apk` : `app/${arm ? 'build-arm64' : 'build'}/outputs/apk/debug/app-debug.apk`)
 const lock = JSON.parse(readFileSync(resolve(root, arm ? 'runtime-lock.arm64-v8a.json' : 'runtime-lock.json'), 'utf8'))
 const digest = bytes => createHash('sha256').update(bytes).digest('hex')
 function tar(args, input) {

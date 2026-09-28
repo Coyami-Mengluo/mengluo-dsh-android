@@ -40,3 +40,5 @@
 ```
 
 签名 JSON 字段：`keystore`（绝对路径）、`storePassword`、`keyAlias`、`keyPassword`。脚本仅通过当前进程环境传给 Gradle，不把密码写进源码。妥善离线备份密钥；丢失或更换签名会破坏覆盖安装和内置更新兼容性。其他贡献者需使用自己的密钥、包名与更新源，不能向原项目用户分发换签名的更新。
+
+构建脚本按 ABI 隔离 Gradle 项目缓存，并立即将 release APK 和元数据保存到 `dist/staging/<ABI>/`。验证和生成更新清单均读取该目录，避免切换构建架构时 Gradle 清理上一架构的产物。

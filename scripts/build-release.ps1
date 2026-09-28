@@ -12,6 +12,15 @@ try {
     $env:MENG_LUO_KEY_ALIAS=$private.keyAlias
     $env:MENG_LUO_KEY_PASSWORD=$private.keyPassword
     & "$PSScriptRoot/build.ps1" -Abi $Abi -Tasks @('assembleRelease', "-PclientVersionName=$VersionName", "-PclientVersionCode=$VersionCode")
+    if ($LASTEXITCODE -ne 0) { throw "Release build failed for $Abi" }
+    $projectRoot = Split-Path -Parent $PSScriptRoot
+    $buildFolder = if ($Abi -eq 'arm64-v8a') { 'build-arm64' } else { 'build' }
+    $output = Join-Path $projectRoot "app/$buildFolder/outputs/apk/release"
+    $staging = Join-Path $projectRoot "dist/staging/$Abi"
+    New-Item -ItemType Directory -Force -Path $staging | Out-Null
+    Copy-Item -LiteralPath "$output/app-release.apk" -Destination "$staging/app-release.apk"
+    Copy-Item -LiteralPath "$output/output-metadata.json" -Destination "$staging/output-metadata.json"
+    Write-Output "Staged $Abi release in $staging"
 } finally {
     foreach ($taskName in $taskSaved.Keys) { [Environment]::SetEnvironmentVariable($taskName, $taskSaved[$taskName], 'Process') }
 }

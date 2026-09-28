@@ -21,6 +21,7 @@ try {
         & "$env:JAVA_HOME\bin\keytool.exe" -genkeypair -keystore '.tools\debug.keystore' -storepass android -alias androiddebugkey -keypass android -dname 'CN=Android Debug,O=Android,C=US' -keyalg RSA -keysize 2048 -validity 10000
         if ($LASTEXITCODE -ne 0) { throw 'Unable to create isolated debug key' }
     }
-    & '.\.tools\gradle-8.9\bin\gradle.bat' --no-daemon --console=plain "-PruntimeAbi=$Abi" @proxyArgs @Tasks
+    # Separate task histories prevent Gradle from deleting the other ABI's outputs.
+    & '.\.tools\gradle-8.9\bin\gradle.bat' --no-daemon --console=plain --project-cache-dir ".gradle/$Abi" "-PruntimeAbi=$Abi" @proxyArgs @Tasks
     exit $LASTEXITCODE
 } finally { Pop-Location }

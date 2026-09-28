@@ -6,10 +6,9 @@ if(!/^\d+\.\d+\.\d+$/.test(version??'')||!Number.isSafeInteger(code)||code<2)thr
 const out=resolve(root,'dist',version);mkdirSync(out,{recursive:true});
 const files={},sums=[];
 for(const abi of ['arm64-v8a','x86_64']) {
- const folder=abi==='arm64-v8a'?'build-arm64':'build';
- const metadata=JSON.parse(readFileSync(resolve(root,`app/${folder}/outputs/apk/release/output-metadata.json`),'utf8'));
+ const metadata=JSON.parse(readFileSync(resolve(root,`dist/staging/${abi}/output-metadata.json`),'utf8'));
  if(metadata.applicationId!=='ai.mengluo.dsh.android'||metadata.elements.length!==1||metadata.elements[0].versionCode!==code||metadata.elements[0].versionName!==version)throw Error('APK build version mismatch');
- const file=resolve(root,`app/${folder}/outputs/apk/release/app-release.apk`),name=`MengLuo-DSH-Android-${version}-${abi}.apk`;
+ const file=resolve(root,`dist/staging/${abi}/app-release.apk`),name=`MengLuo-DSH-Android-${version}-${abi}.apk`;
  copyFileSync(file,resolve(out,name));const sha256=createHash('sha256').update(readFileSync(file)).digest('hex');
  files[abi]={url:`https://github.com/Coyami-Mengluo/mengluo-dsh-android/releases/download/v${version}/${name}`,sha256,size:statSync(file).size};sums.push(`${sha256}  ${name}`);
 }
