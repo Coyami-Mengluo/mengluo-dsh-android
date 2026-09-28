@@ -1,0 +1,16 @@
+.tools/
+.gradle/
+local.properties
+**/build/
+app/build-*/
+dist/
+app/src/main/assets/runtime/
+app/src/main/jniLibs/
+*.jks
+*.keystore
+*.p12
+*.pem
+*.key
+signing.properties
+signing.json
+.idea/

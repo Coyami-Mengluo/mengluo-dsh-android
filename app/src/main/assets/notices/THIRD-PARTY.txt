@@ -1,0 +1,41 @@
+MengLuo DSH Android
+
+The desktop/mobile shell is not an official DeepSeek product. Harness is fetched
+separately from the selected npm registry and retains its own upstream license.
+
+On-demand components (not included in the APK and not relicensed):
+
+Ubuntu Base 24.04.3: https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/
+Each package's license/copyright is included in the rootfs under /usr/share/doc/.
+Ubuntu source packages: https://archive.ubuntu.com/ubuntu/pool/
+
+Node.js 24.19.0: https://nodejs.org/dist/v24.19.0/
+Node and included dependencies' notices are in /opt/node/LICENSE after extraction.
+Source: https://nodejs.org/dist/v24.19.0/node-v24.19.0.tar.gz
+
+Bundled native components (original, unmodified binary bytes):
+
+PRoot 5.1.107.95 (Termux build): GPL-2.0; full text: proot-copyright.txt
+Source: https://github.com/termux/proot/tree/v5.1.107.95
+Source archive: https://github.com/termux/proot/archive/refs/tags/v5.1.107.95.zip
+
+libtalloc 2.4.3 (Termux build): see libtalloc-copyright.txt and upstream source.
+Source: https://www.samba.org/ftp/talloc/talloc-2.4.3.tar.gz
+
+libandroid-shmem 0.7 (Termux build): BSD-3-Clause; libandroid-shmem-copyright.txt
+Source: https://github.com/termux/libandroid-shmem/tree/v0.7
+
+Corresponding native sources, fixed Termux build framework, recipes and patches:
+native-corresponding-source.tar.gz, alongside the APKs at
+https://github.com/Coyami-Mengluo/mengluo-dsh-android/releases
+Termux snapshot: 3797184e81b2ae6cb220c6f2562d63ec80b57f9f
+Downloaded binary package URLs and SHA256 checksums are recorded in
+assets/runtime/manifest.json inside the APK and the project's runtime-lock files.
+
+Application libraries include AndroidX/AppCompat/WebKit, Material Components
+(Apache-2.0), and Apache Commons Compress/IO/Lang (Apache-2.0). Their upstream
+license and notice resources are retained in library-notices.txt. The full
+Apache license is APACHE-2.0.txt. Components without an archive NOTICE remain
+listed in the library inventory; their upstream licenses are unchanged.
+
+ARM64 physical-device compatibility is not yet verified. See the project README.

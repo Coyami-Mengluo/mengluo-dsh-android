@@ -1,0 +1,102 @@
+plugins { id 'com.android.application' }
+
+def runtimeAbi = providers.gradleProperty('runtimeAbi').orElse('x86_64').get()
+if (!(runtimeAbi in ['x86_64', 'arm64-v8a'])) throw new GradleException('Unsupported runtimeAbi')
+def runtimeStage = rootProject.file(".tools/runtime/${runtimeAbi}")
+// Keep the tested emulator APK/output and the phone APK/output independent.
+if (runtimeAbi == 'arm64-v8a') layout.buildDirectory.set(file('build-arm64'))
+
+android {
+    namespace 'ai.mengluo.dsh.android'
+    compileSdk 35
+    buildToolsVersion '35.0.0'
+    signingConfigs {
+        debug { storeFile file('../.tools/debug.keystore'); storePassword 'android'; keyAlias 'androiddebugkey'; keyPassword 'android' }
+        release {
+            if (System.getenv('MENG_LUO_KEYSTORE')) {
+                storeFile file(System.getenv('MENG_LUO_KEYSTORE'))
+                storePassword System.getenv('MENG_LUO_STORE_PASSWORD')
+                keyAlias System.getenv('MENG_LUO_KEY_ALIAS')
+                keyPassword System.getenv('MENG_LUO_KEY_PASSWORD')
+            }
+        }
+    }
+    buildTypes { release { signingConfig signingConfigs.release; debuggable false } }
+    defaultConfig {
+        applicationId 'ai.mengluo.dsh.android'
+        minSdk 30
+        targetSdk 35
+        versionCode providers.gradleProperty('clientVersionCode').orElse('2').get().toInteger()
+        versionName providers.gradleProperty('clientVersionName').orElse('0.0.1').get()
+        ndk { abiFilters runtimeAbi }
+        buildConfigField 'String', 'RUNTIME_ABI', "\"${runtimeAbi}\""
+        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+    }
+    buildFeatures { buildConfig true }
+    sourceSets {
+        main {
+            assets.srcDirs = [layout.buildDirectory.dir('generated/publicAssets')]
+            jniLibs.srcDirs = [new File(runtimeStage, 'jniLibs')]
+        }
+    }
+    compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+    packaging { jniLibs { useLegacyPackaging true; keepDebugSymbols += ['**/*.so'] } }
+    androidResources { noCompress += ['tgz', 'xz'] }
+    lint { abortOnError true }
+}
+
+tasks.register('stageCommonAssets', Copy) {
+    from('src/main/assets') { exclude 'runtime/**' }
+    into(new File(runtimeStage, 'assets'))
+    doFirst {
+        def manifestFile = new File(runtimeStage, 'assets/runtime/manifest.json')
+        if (!manifestFile.isFile()) throw new GradleException("Run node scripts/prepare-runtime.mjs ${runtimeAbi} first")
+        def manifest = new groovy.json.JsonSlurper().parse(manifestFile)
+        if (manifest.abi != runtimeAbi) throw new GradleException('Runtime asset ABI mismatch')
+    }
+}
+tasks.register('stagePublicAssets', Sync) {
+    dependsOn('stageCommonAssets', 'collectLibraryNotices')
+    from(new File(runtimeStage, 'assets')) { exclude 'runtime/*.tgz', 'runtime/*.xz' }
+    from(layout.buildDirectory.dir('generated/licensing')) { into 'notices' }
+    into(layout.buildDirectory.dir('generated/publicAssets'))
+}
+tasks.register('collectLibraryNotices') {
+    inputs.files(configurations.releaseRuntimeClasspath)
+    def notice = layout.buildDirectory.file('generated/licensing/library-notices.txt')
+    outputs.file(notice)
+    doLast {
+        def text = new StringBuilder('Bundled Java/Android libraries and original archive notices\n\n')
+        def scan
+        scan = { byte[] bytes, String parent, int depth ->
+            def zip = new java.util.zip.ZipInputStream(new ByteArrayInputStream(bytes))
+            try {
+                for (def entry = zip.nextEntry; entry != null; entry = zip.nextEntry) {
+                    if (entry.directory) continue
+                    if (entry.name.toLowerCase().matches('.*(license|notice|copyright).*')) {
+                        byte[] value = zip.readNBytes(2 * 1024 * 1024)
+                        text.append('\n--- ').append(parent).append('/').append(entry.name).append(' ---\n').append(new String(value, 'UTF-8')).append('\n')
+                    } else if (depth == 0 && entry.name == 'classes.jar') scan(zip.readAllBytes(), parent + '/classes.jar', 1)
+                }
+            } finally { zip.close() }
+        }
+        configurations.releaseRuntimeClasspath.resolvedConfiguration.resolvedArtifacts.toList().sort { it.moduleVersion.id.toString() }.each { artifact ->
+            text.append('\nComponent: ').append(artifact.moduleVersion.id.toString()).append('\n')
+            if (artifact.file.name.endsWith('.jar') || artifact.file.name.endsWith('.aar')) scan(artifact.file.bytes, artifact.moduleVersion.id.toString(), 0)
+        }
+        notice.get().asFile.parentFile.mkdirs(); notice.get().asFile.setText(text.toString(), 'UTF-8')
+    }
+}
+tasks.named('preBuild').configure { dependsOn('stagePublicAssets') }
+
+dependencies {
+    implementation 'androidx.webkit:webkit:1.12.1'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'com.google.android.material:material:1.12.0'
+    implementation 'org.apache.commons:commons-compress:1.27.1'
+    implementation 'commons-io:commons-io:2.17.0'
+    implementation 'org.apache.commons:commons-lang3:3.17.0'
+    testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test:runner:1.6.2'
+    androidTestImplementation 'androidx.test.ext:junit:1.2.1'
+}

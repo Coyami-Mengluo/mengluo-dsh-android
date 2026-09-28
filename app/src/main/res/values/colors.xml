@@ -1,0 +1,15 @@
+<resources>
+    <color name="page">#F5F6FA</color>
+    <color name="surface">#FFFFFF</color>
+    <color name="ink">#202637</color>
+    <color name="muted">#71798D</color>
+    <color name="accent">#4561DC</color>
+    <color name="on_accent">#FFFFFF</color>
+    <color name="tonal">#EDF0FF</color>
+    <color name="outline">#E3E7F1</color>
+    <color name="success">#25765A</color>
+    <color name="success_surface">#E7F5ED</color>
+    <color name="danger">#B53D45</color>
+    <color name="danger_surface">#FFF0F1</color>
+    <bool name="light_system_bars">true</bool>
+</resources>

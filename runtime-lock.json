@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "abi": "x86_64",
+  "harnessVersion": "0.1.7-rc.2",
+  "nodeVersion": "24.19.0",
+  "assets": [
+    {
+      "name": "ubuntu-base.tgz",
+      "url": "https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.3-base-amd64.tar.gz",
+      "sha256": "6bc2cde3930ad088b3bb46fa45279e96d25bc3810f209850ecbe4722711874f9"
+    },
+    {
+      "name": "node-linux.tgz",
+      "url": "https://nodejs.org/dist/v24.19.0/node-v24.19.0-linux-x64.tar.gz",
+      "sha256": "f625d97cd707df4ff96254916fbc5ff014f09c09effe5a1e0ca8f6d41a8789d4"
+    }
+  ],
+  "native": [
+    {
+      "name": "libproot.so",
+      "sha256": "7c129d9d10a90e3baa73b7784381b34b961ffadb1de4f9773695432e88b7823f"
+    },
+    {
+      "name": "libproot-loader.so",
+      "sha256": "a836b0569c84b1661333d16bacf6b396ff08fea816a5c936a82e08ddeeca8341"
+    },
+    {
+      "name": "libtalloc.so",
+      "sha256": "77be445f4ec245fff9c19e9874ebcf99618244cf48737f5fca938316daaa70da"
+    },
+    {
+      "name": "libandroid-shmem.so",
+      "sha256": "092926060298acd3778e6239033d7aef1280dcb59aebe021a3719612e6a3465f"
+    }
+  ],
+  "packages": [
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/p/proot/proot_5.1.107.95_x86_64.deb",
+      "sha256": "f63ce9bd0d38715eae0163a3772f3395913587444c7ce7232091c6d359afe3c3"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/libt/libtalloc/libtalloc_2.4.3_x86_64.deb",
+      "sha256": "7ca2eaae2e53b28228a01301bc410b62845403d6317c25b8e0a7f40681de0628"
+    },
+    {
+      "url": "https://packages.termux.dev/apt/termux-main/pool/main/liba/libandroid-shmem/libandroid-shmem_0.7_x86_64.deb",
+      "sha256": "ffa9e4c87467b158b148d0ff92dda796aa038276c2075af3269cdcdb06f25797"
+    }
+  ]
+}
