@@ -26,8 +26,8 @@ android {
         applicationId 'ai.mengluo.dsh.android'
         minSdk 30
         targetSdk 35
-        versionCode providers.gradleProperty('clientVersionCode').orElse('3').get().toInteger()
-        versionName providers.gradleProperty('clientVersionName').orElse('0.0.2').get()
+        versionCode providers.gradleProperty('clientVersionCode').orElse('5').get().toInteger()
+        versionName providers.gradleProperty('clientVersionName').orElse('0.0.3').get()
         ndk { abiFilters runtimeAbi }
         buildConfigField 'String', 'RUNTIME_ABI', "\"${runtimeAbi}\""
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'

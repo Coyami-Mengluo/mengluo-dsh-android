@@ -23,6 +23,7 @@ final class ProjectBrowser {
     private final Ui ui;
     private final File profile, cache;
     private final ProjectFiles files;
+    private final ProjectFolderExporter folders;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final Set<AlertDialog> dialogs = new HashSet<>();
     private boolean closed;
@@ -32,17 +33,19 @@ final class ProjectBrowser {
     ProjectBrowser(Activity activity, File workspace, File rootfs, File profile, Bundle saved) {
         this.activity = activity; ui = new Ui(activity); this.profile = profile; cache = activity.getCacheDir();
         files = new ProjectFiles(workspace, rootfs);
+        folders = new ProjectFolderExporter(activity, files, cache, saved);
         if (saved != null && saved.getString("files.project") != null) {
             pendingProject = new ProjectFiles.Project(saved.getString("files.title", "项目"), saved.getString("files.project"));
             pendingRelative = saved.getString("files.relative", ""); pendingRequest = saved.getInt("files.request", 0);
         }
     }
     void save(Bundle state) {
+        folders.save(state);
         if (pendingProject == null) return;
         state.putString("files.project", pendingProject.path); state.putString("files.title", pendingProject.title);
         state.putString("files.relative", pendingRelative); state.putInt("files.request", pendingRequest);
     }
-    void close() { closed = true; for (AlertDialog dialog : new ArrayList<>(dialogs)) dialog.dismiss(); worker.shutdown(); }
+    void close() { closed = true; folders.close(); for (AlertDialog dialog : new ArrayList<>(dialogs)) dialog.dismiss(); worker.shutdown(); }
     private AlertDialog show(MaterialAlertDialogBuilder builder) { AlertDialog dialog = builder.create(); show(dialog); return dialog; }
     private void show(AlertDialog dialog) { dialogs.add(dialog); dialog.setOnDismissListener(ignored -> dialogs.remove(dialog)); dialog.show(); }
     private void toast(String value) { Toast.makeText(activity, value, Toast.LENGTH_LONG).show(); }
@@ -80,7 +83,7 @@ final class ProjectBrowser {
             MaterialAlertDialogBuilder builder = new MaterialAlertDialogBuilder(activity).setTitle(title)
                 .setNegativeButton("项目列表", (dialog, which) -> showProjects())
                 .setPositiveButton("新建文件", (dialog, which) -> newFile(project, relative))
-                .setNeutralButton("导入到此目录", (dialog, which) -> pick(project, relative, IMPORT));
+                .setNeutralButton("导入 / 导出", (dialog, which) -> transfers(project, relative));
             if (labels.isEmpty()) builder.setMessage("此目录还没有文件。\n" + project.path + (relative.isEmpty() ? "" : "/" + relative));
             else builder.setItems(labels.toArray(new String[0]), (dialog, which) -> actions.get(which).run());
             show(builder);
@@ -90,6 +93,16 @@ final class ProjectBrowser {
         }
     }
     private static String parent(String path) { int slash = path.lastIndexOf('/'); return slash < 0 ? "" : path.substring(0, slash); }
+    private void transfers(ProjectFiles.Project project, String relative) {
+        ArrayList<String> labels = new ArrayList<>(List.of(relative.isEmpty() ? "导出整个项目…" : "导出当前文件夹…"));
+        if (!relative.isEmpty()) labels.add("导出整个项目…");
+        labels.add("导入文件到此目录…");
+        show(new MaterialAlertDialogBuilder(activity).setTitle("导入 / 导出")
+            .setItems(labels.toArray(new String[0]), (dialog, index) -> {
+                if (index == labels.size() - 1) pick(project, relative, IMPORT);
+                else folders.choose(project, index == 0 ? relative : "");
+            }).setNegativeButton("返回目录", (dialog, which) -> browse(project, relative, 0)));
+    }
     private void newFile(ProjectFiles.Project project, String directory) {
         EditText name = new TextInputEditText(activity); name.setHint("文件名，例如 hello.js"); name.setSingleLine(true);
         AlertDialog dialog = new MaterialAlertDialogBuilder(activity).setTitle("新建文件 · " + project.title).setView(ui.input(name))
@@ -138,6 +151,7 @@ final class ProjectBrowser {
     }
     private void clearPending() { pendingProject = null; pendingRelative = null; pendingRequest = 0; }
     boolean onActivityResult(int request, int result, Intent data) {
+        if (folders.result(request, result, data)) return true;
         if (request != IMPORT && request != EXPORT) return false;
         ProjectFiles.Project project = pendingProject; String relative = pendingRelative; int expected = pendingRequest; clearPending();
         if (result != Activity.RESULT_OK || data == null || data.getData() == null) return true;

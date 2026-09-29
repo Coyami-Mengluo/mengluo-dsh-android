@@ -35,13 +35,17 @@ final class ProjectFiles {
         return relativePath(directory.isEmpty() ? name : directory + "/" + name);
     }
     private static boolean under(String path, String base) { return path.equals(base) || path.startsWith(base + "/"); }
+    static boolean runtimePath(String path) {
+        for (String reserved : List.of("/dev", "/proc", "/sys", "/root/.dsh", "/opt", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/run"))
+            if (under(path, reserved)) return true;
+        return false;
+    }
     File resolve(Project project, String relative) throws IOException {
         String root = guestPath(project.path), tail = relativePath(relative);
         if (root.equals("/")) throw new IOException("请在 Harness 中选择具体项目，而不是整个系统根目录");
         String path = root + (tail.isEmpty() ? "" : "/" + tail);
         // These are runtime internals or host/profile bind mounts, not code projects.
-        for (String reserved : List.of("/dev", "/proc", "/sys", "/root/.dsh", "/opt", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/run"))
-            if (under(path, reserved)) throw new IOException("此目录属于运行环境或配置，不能作为代码目录打开");
+        if (runtimePath(path)) throw new IOException("此目录属于运行环境或配置，不能作为代码目录打开");
         File base = under(path, "/workspace") ? workspace : rootfs;
         String suffix = under(path, "/workspace") ? path.substring("/workspace".length()) : path;
         return withoutLinks(base, suffix.startsWith("/") ? suffix.substring(1) : suffix);

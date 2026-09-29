@@ -5,6 +5,12 @@ import java.io.File;
 import java.io.IOException;
 
 public class RuntimePolicyTest {
+    @Test public void guestPathIncludesPackageConfigurationToolsWithoutCurrentDirectory() {
+        var path = java.util.Arrays.asList(RuntimePolicy.GUEST_PATH.split(":", -1));
+        assertEquals("/opt/node/bin", path.get(0));
+        assertTrue(path.contains("/usr/sbin")); assertTrue(path.contains("/sbin"));
+        assertFalse(path.contains("")); assertFalse(path.contains("."));
+    }
     @Test public void onlyExactVersionsAreAccepted() {
         assertEquals("0.1.7-rc.2", RuntimePolicy.exactVersion("0.1.7-rc.2"));
         for (String bad : new String[]{"latest", "x; echo broken", "../a", "1.2"}) {

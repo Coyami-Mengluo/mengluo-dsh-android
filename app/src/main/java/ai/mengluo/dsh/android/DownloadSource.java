@@ -5,8 +5,8 @@ import java.nio.charset.StandardCharsets;
 
 /** Fixed HTTPS registries; choosing a mirror never changes package names or versions. */
 enum DownloadSource {
-    MIRROR("mirror", "国内镜像 · npmmirror", "https://registry.npmmirror.com/"),
-    OFFICIAL("official", "官方源 · npm", "https://registry.npmjs.org/");
+    MIRROR("mirror", "国内镜像 · npmmirror / USTC", "https://registry.npmmirror.com/"),
+    OFFICIAL("official", "官方源 · npm / Ubuntu", "https://registry.npmjs.org/");
 
     final String id, title, registry;
     DownloadSource(String id, String title, String registry) {

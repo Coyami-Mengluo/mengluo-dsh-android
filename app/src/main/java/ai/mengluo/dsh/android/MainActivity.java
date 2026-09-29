@@ -59,6 +59,7 @@ public final class MainActivity extends AppCompatActivity {
     private String loadedUrl;
     private ScriptHandler compatibilityScript;
     private ProjectBrowser projectBrowser;
+    private LogExporter logExporter;
     private PermissionHelp permissionHelp;
     private boolean ballCollapsed, ballTouching, ballMenuOpen;
     private final Runnable collapseBall = () -> {
@@ -82,6 +83,7 @@ public final class MainActivity extends AppCompatActivity {
         ui = new Ui(this);
         permissionHelp = new PermissionHelp(this, ui);
         projectBrowser = new ProjectBrowser(this, engine.workspace, engine.rootfs, engine.profile, saved);
+        logExporter = new LogExporter(this, engine, saved);
         frame = new FrameLayout(this); frame.setBackgroundColor(ui.color(R.color.page));
         frame.setTag("shell-frame");
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
@@ -181,7 +183,7 @@ public final class MainActivity extends AppCompatActivity {
         runtime.addView(install, new LinearLayout.LayoutParams(-1, -2)); panels.addView(runtime);
 
         LinearLayout download = ui.card(); download.addView(label("下载源", 17, true));
-        download.addView(ui.caption("为 Harness 和 npm 插件选择合适的下载线路。")); ui.gap(download, 6);
+        download.addView(ui.caption("为基础环境、安装依赖、Harness 和 npm 插件选择下载线路。")); ui.gap(download, 6);
         sourceButton = ui.button(engine.downloadSource().title, R.drawable.ic_download, false, this::downloads);
         download.addView(sourceButton, new LinearLayout.LayoutParams(-1, -2)); panels.addView(download);
         updatesButton = ui.button("更新管理", R.drawable.ic_download, false, updatesDialog::show);
@@ -357,7 +359,7 @@ public final class MainActivity extends AppCompatActivity {
         String[] choices = Arrays.stream(sources).map(source -> source.title + "\n" + source.registry).toArray(String[]::new);
         final DownloadSource[] selected = {engine.downloadSource()};
         LinearLayout content = ui.column(24); content.setPadding(dp(24), dp(8), dp(24), dp(8));
-        content.addView(ui.caption("选择 Harness 和 npm 插件的下载线路。")); ui.gap(content, 14);
+        content.addView(ui.caption("选择基础环境、Ubuntu 依赖、Harness、pnpm 和 npm 插件的下载线路。")); ui.gap(content, 14);
         RadioGroup group = new RadioGroup(this);
         for (int i = 0; i < sources.length; i++) {
             MaterialRadioButton option = new MaterialRadioButton(this); option.setId(View.generateViewId()); option.setText(choices[i]); option.setTextSize(14);
@@ -371,7 +373,7 @@ public final class MainActivity extends AppCompatActivity {
             });
         }
         content.addView(group);
-        content.addView(ui.caption("第三方镜像可能延迟同步；GitHub 地址及系统工具不受此设置影响。"));
+        content.addView(ui.caption("Ubuntu 安装依赖使用 USTC 镜像，下载失败时回退官方源；保留签名校验。GitHub 地址不变，手动 apt 命令仍使用原有配置。第三方镜像可能延迟同步。"));
         TextView result = ui.caption("后续下载生效。已启动的 Harness 需重启以同步设置。"); content.addView(result); ui.gap(content, 12);
         Button check = button("保存并检测目标版本", () -> {}); content.addView(check, new LinearLayout.LayoutParams(-1, -2));
         ScrollView scroll = new ScrollView(this); scroll.addView(content);
@@ -392,9 +394,13 @@ public final class MainActivity extends AppCompatActivity {
     }
     private void logs() {
         TextView text = label(engine.logs(), 12, false); text.setTextIsSelectable(true); text.setTypeface(Typeface.MONOSPACE); text.setPadding(dp(14), 0, dp(14), 0);
-        ScrollView scroll = new ScrollView(this); scroll.addView(text);
+        LinearLayout content = ui.column(14);
+        content.addView(ui.caption("界面显示近期日志。导出包含最多 3 MiB 历史记录及重启前日志；常见凭据已脱敏，分享前仍请检查。"));
+        content.addView(text);
+        ScrollView scroll = new ScrollView(this); scroll.addView(content);
         new MaterialAlertDialogBuilder(this).setTitle("运行日志").setView(scroll)
-            .setPositiveButton("关闭", null).setNeutralButton("刷新", (dialog, which) -> logs()).show();
+            .setPositiveButton("关闭", null).setNegativeButton("刷新", (dialog, which) -> logs())
+            .setNeutralButton("导出日志", (dialog, which) -> logExporter.start()).show();
     }
     private void terminal() {
         EditText command = new TextInputEditText(this); command.setHint("命令，例如 node -v"); command.setMinLines(3); command.setTypeface(Typeface.MONOSPACE);
@@ -416,10 +422,10 @@ public final class MainActivity extends AppCompatActivity {
     }
     @Override protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
-        projectBrowser.onActivityResult(request, result, data);
+        if (!logExporter.result(request, result, data)) projectBrowser.onActivityResult(request, result, data);
     }
     @Override protected void onSaveInstanceState(Bundle state) {
-        state.putBoolean("ball-collapsed", ballCollapsed); projectBrowser.save(state); super.onSaveInstanceState(state);
+        state.putBoolean("ball-collapsed", ballCollapsed); projectBrowser.save(state); logExporter.save(state); super.onSaveInstanceState(state);
     }
     private void externalLink(Uri uri) {
         if (!"https".equals(uri.getScheme()) && !"http".equals(uri.getScheme())) { toast("不支持此链接类型"); return; }
@@ -430,5 +436,5 @@ public final class MainActivity extends AppCompatActivity {
     @Override public void onBackPressed() { if (web.getVisibility() == View.VISIBLE && web.canGoBack()) web.goBack(); else if (web.getVisibility() == View.VISIBLE) showHome(); else super.onBackPressed(); }
     @Override protected void onResume() { super.onResume(); if (updates != null) updates.automaticCheck(); }
     @Override public void onWindowFocusChanged(boolean focused) { super.onWindowFocusChanged(focused); if (focused && updates != null) updateObserver.run(); }
-    @Override protected void onDestroy() { updates.unlisten(updateObserver); updatesDialog.close(); ball.removeCallbacks(collapseBall); ball.animate().cancel(); engine.unlisten(observer); projectBrowser.close(); permissionHelp.close(); if (compatibilityScript != null) compatibilityScript.remove(); web.destroy(); super.onDestroy(); }
+    @Override protected void onDestroy() { updates.unlisten(updateObserver); updatesDialog.close(); ball.removeCallbacks(collapseBall); ball.animate().cancel(); engine.unlisten(observer); projectBrowser.close(); logExporter.close(); permissionHelp.close(); if (compatibilityScript != null) compatibilityScript.remove(); web.destroy(); super.onDestroy(); }
 }

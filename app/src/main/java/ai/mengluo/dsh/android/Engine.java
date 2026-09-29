@@ -29,7 +29,7 @@ final class Engine {
     private final ExecutorService readers = Executors.newCachedThreadPool();
     private final Handler main = new Handler(Looper.getMainLooper());
     private final ArrayList<Consumer<Engine>> listeners = new ArrayList<>();
-    private final StringBuilder log = new StringBuilder();
+    private final RuntimeLog log;
     private volatile Process backend, operation;
     private volatile long generation;
     volatile boolean busy;
@@ -41,10 +41,12 @@ final class Engine {
         this.context = context;
         downloadSource = DownloadSource.fromId(context.getSharedPreferences("downloads", 0).getString("source", "mirror"));
         File files = context.getFilesDir();
+        log = new RuntimeLog(new File(files, "logs"));
         workspace = new File(files, "workspace"); profile = new File(files, "profile");
         rootfs = new File(files, "runtime/rootfs"); stateFile = new File(files, "runtime/state.json");
         versions = new RuntimeStore(rootfs);
         workspace.mkdirs(); profile.mkdirs();
+        note("客户端启动 · " + BuildConfig.VERSION_NAME + " · " + downloadSource.title);
         note("设备：" + android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL + " · Android " + android.os.Build.VERSION.RELEASE
             + " · APK " + BuildConfig.RUNTIME_ABI + " · 系统 ABI " + String.join(",", android.os.Build.SUPPORTED_64_BIT_ABIS));
         if (installed()) status = "本地运行环境已安装，点击启动";
@@ -77,11 +79,14 @@ final class Engine {
     }
     synchronized void listen(Consumer<Engine> listener) { listeners.add(listener); listener.accept(this); }
     synchronized void unlisten(Consumer<Engine> listener) { listeners.remove(listener); }
-    synchronized String logs() { return log.toString(); }
+    String logs() { return log.tail(); }
+    byte[] exportLogs() throws IOException {
+        return log.snapshot("MengLuo DSH Android " + BuildConfig.VERSION_NAME + " · " + BuildConfig.RUNTIME_ABI
+            + "\nHarness " + currentVersion() + " · 下载源：" + downloadSource.title);
+    }
     synchronized void note(String value) {
         String clean = RuntimePolicy.redact(value);
-        log.append(clean).append('\n');
-        if (log.length() > 64_000) log.delete(0, log.length() - 48_000);
+        log.append(clean);
         android.util.Log.i("MengLuoRuntime", clean);
     }
     private synchronized void event(String value) {
@@ -139,10 +144,11 @@ final class Engine {
                 prepareDirectories();
                 event("检查本机 Node 和 Bash");
                 run(List.of("/opt/node/bin/node", "-e", "console.log('node='+process.version+' platform='+process.platform+' arch='+process.arch)"), 30, epoch);
-                if (!new File(rootfs, "usr/bin/git").isFile() || !new File(rootfs, "usr/bin/python3").exists()) {
-                    event("安装 Git、Python 和证书 · 使用 Ubuntu 签名软件源");
-                    run(List.of("/usr/bin/apt-get", "-o", "APT::Sandbox::User=root", "update"), 600, epoch);
-                    run(List.of("/usr/bin/apt-get", "-o", "APT::Sandbox::User=root", "install", "-y", "--no-install-recommends", "git", "python3", "ca-certificates"), 900, epoch);
+                if (!installed() || !new File(rootfs, "usr/bin/git").isFile() || !new File(rootfs, "usr/bin/python3").exists()
+                    || !new File(rootfs, "etc/ssl/certs/ca-certificates.crt").isFile()) {
+                    AptSetup.prepare(rootfs, BuildConfig.RUNTIME_ABI, SystemCertificates.pem());
+                    AptSetup.install(source, BuildConfig.RUNTIME_ABI, (command, seconds) -> run(command, seconds, epoch),
+                        message -> { note(message); event(message); }, () -> cancelled(epoch));
                 }
                 RuntimeStore.Slot candidate = installCandidate(release, source, epoch);
                 event("隔离启动测试 · " + targetVersion + " · 上限 120 秒");
@@ -174,11 +180,16 @@ final class Engine {
         if (!manager.matches("pnpm@[0-9]+\\.[0-9]+\\.[0-9]+(?:\\+sha[0-9]+\\.[a-fA-F0-9]+)?")) throw new IOException("新版配套包管理器尚不支持，请更新客户端");
         String pnpm = manager.substring(5).split("\\+", 2)[0]; UpdatePolicy.version(pnpm);
         RegistryClient.checkVersion(source, "pnpm", pnpm);
-        event("安装配套 pnpm " + pnpm);
+        event("解析官方配套 pnpm " + pnpm);
         new File(directory, "tools").mkdirs();
+        IO.text(new File(directory, "tools/npmrc"), ""); IO.text(new File(directory, "tools/npmrc.global"), "");
         ArrayList<String> tools = npmArguments(guest + "/tools", "install", DownloadSource.OFFICIAL);
-        tools.add("pnpm@" + pnpm); // Small official package, never takes a dependency graph from a mirror.
+        tools.add("--package-lock-only"); tools.add("pnpm@" + pnpm);
         run(tools, remaining(deadline), epoch);
+        String toolsLock = IO.text(new File(directory, "tools/package-lock.json"));
+        event("下载配套 pnpm " + pnpm + " · " + source.title);
+        run(npmArguments(guest + "/tools", "ci", source), remaining(deadline), epoch);
+        if (!toolsLock.equals(IO.text(new File(directory, "tools/package-lock.json")))) throw new IOException("配套 pnpm 依赖锁被改动，已拒绝切换");
         RuntimeStore.Slot slot = new RuntimeStore.Slot(release.version, guest, pnpm);
         if (!versions.valid(slot)) throw new IOException("安装后的 Harness 版本不匹配");
         run(List.of("/opt/node/bin/node", "--expose-internals", slot.cli(), "--version"), 60, epoch);
@@ -269,7 +280,7 @@ final class Engine {
         if (isolatedHome != null) { new File(isolatedHome, ".dsh").mkdirs(); args.addAll(List.of("-b", isolatedHome.getPath() + ":/root")); }
         args.addAll(List.of("-b", data.getPath() + ":/root/.dsh", "-w", "/workspace", "/usr/bin/env", "-i",
             "HOME=/root", "USER=root", "LANG=C.UTF-8", "TERM=xterm-256color", "TMPDIR=/tmp", "DEBIAN_FRONTEND=noninteractive",
-            "PATH=/opt/node/bin:/usr/local/bin:/usr/bin:/bin", "DSH_HOME=/root/.dsh", "DSH_TELEMETRY_DISABLED=1"));
+            "PATH=" + RuntimePolicy.GUEST_PATH, "DSH_HOME=/root/.dsh", "DSH_TELEMETRY_DISABLED=1"));
         args.addAll(downloadSource.packageEnvironment());
         args.addAll(command);
         ProcessBuilder builder = new ProcessBuilder(args).directory(context.getFilesDir()).redirectErrorStream(true);
@@ -290,12 +301,16 @@ final class Engine {
         cancelled(epoch);
         Process process = spawn(command);
         synchronized (this) { if (epoch != generation) { RuntimeProcesses.stopAndWait(process, 3); cancelled(epoch); } operation = process; }
-        Future<?> output = readers.submit(() -> consume(process, value -> {}));
+        CommandFailure.Output captured = new CommandFailure.Output();
+        Future<?> output = readers.submit(() -> consume(process, captured::add));
         try {
-            if (!process.waitFor(seconds, TimeUnit.SECONDS)) { RuntimeProcesses.stop(process); throw new IOException("命令执行超时"); }
+            if (!process.waitFor(seconds, TimeUnit.SECONDS)) {
+                RuntimeProcesses.stopAndWait(process, 3); cancelled(epoch);
+                throw new CommandFailure(command.get(0), "执行超过 " + seconds + " 秒", captured);
+            }
             output.get(5, TimeUnit.SECONDS);
             cancelled(epoch);
-            if (process.exitValue() != 0) throw new IOException("命令退出码 " + process.exitValue() + "，请查看日志");
+            if (process.exitValue() != 0) throw new CommandFailure(command.get(0), "退出码 " + process.exitValue(), captured);
         } finally { if (process.isAlive()) RuntimeProcesses.stopAndWait(process, 3); if (operation == process) operation = null; }
     }
     void start() {

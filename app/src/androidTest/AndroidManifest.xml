@@ -1,0 +1,7 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <application>
+        <!-- Test APK only. The provider also restricts callers to the target app UID. -->
+        <provider android:name="ai.mengluo.dsh.android.ExportTestProvider"
+            android:authorities="ai.mengluo.dsh.android.test.export" android:exported="true" />
+    </application>
+</manifest>

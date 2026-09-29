@@ -11,6 +11,8 @@ import java.util.regex.Pattern;
 public final class RuntimePolicy {
     private RuntimePolicy() {}
     public static final String HARNESS_VERSION = "0.1.7-rc.2";
+    // dpkg configuration and maintainer scripts also need ldconfig/start-stop-daemon in sbin.
+    static final String GUEST_PATH = "/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
     private static final Pattern VERSION = Pattern.compile("[0-9]+\\.[0-9]+\\.[0-9]+(?:-[A-Za-z0-9.-]+)?");
     public static String exactVersion(String value) {
         if (!VERSION.matcher(value).matches()) throw new IllegalArgumentException("请输入完整版本号");
@@ -34,6 +36,8 @@ public final class RuntimePolicy {
     public static String redact(String text) {
         return text.replaceAll("(?i)([?&#]token=)[^\\s&#\"'<>]+", "$1[REDACTED]")
             .replaceAll("(?i)(bearer\\s+)[A-Za-z0-9._~+/-]+=*", "$1[REDACTED]")
+            .replaceAll("(?i)((?:[a-z0-9_]*api[_-]?key|access_token|refresh_token|_authToken)[\"']?\\s*[:=]\\s*[\"']?)[^\\s,;\"'<>]+", "$1[REDACTED]")
+            .replaceAll("(?i)(https?://)[^\\s/@:]+:[^\\s/@]+@", "$1[REDACTED]@")
             .replaceAll("sk-[A-Za-z0-9_-]{12,}", "[REDACTED]");
     }
     public static String quote(String text) { return "'" + text.replace("'", "'\"'\"'") + "'"; }
