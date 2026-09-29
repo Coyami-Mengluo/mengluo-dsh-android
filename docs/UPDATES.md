@@ -13,6 +13,7 @@
 - 运行日志位于 App 私有 `files/logs/`，分三段滚动保留，每段最多 1 MiB。界面只显示近期片段，导出读取保留的全部段。日志写入前和导出时均脱敏常见凭据，不收集聊天数据库、配置文件或项目文件；任意命令可能输出其他私人内容，分享前需自行检查。
 - 候选目录为 rootfs 内 `/opt/harness-slots/…`。基础 rootfs 不随 Harness 更新替换；`/workspace`、`/root/用户项目` 与 App 私有 profile 保留。
 - 基础环境解压不调用 Android 普通应用被禁止的硬链接操作；归档硬链接复制为普通文件并保留源文件权限。复制仅接受本次归档内的普通文件，计入解压大小上限，符号链接仍在最后创建。安装失败后可重试，不需要清除 App 数据。
+- PRoot 启用 `--link2symlink` 和 `-L`，兼容 dpkg 状态备份及运行命令新建的硬链接。`PROOT_L2S_DIR` 固定为 rootfs 内的 `.l2s` 实际目录；这是运行环境持久数据，不能作为缓存清理或单独删除。APK 覆盖升级、重启及 Harness 槽位切换均保留它。项目文件浏览器不开放此目录，仍拒绝跟随宿主符号链接。
 - 配套 pnpm 读取包的 `packageManager`；未声明时使用记录的默认版本。Node 是基础环境版本（当前 24.19.0）；使用 `--engine-strict` 和实际启动测试拒绝不兼容候选。此版不自动升级 Node/Ubuntu，也不承诺兼容官方所有历史/未来版本。
 - 原子状态在切换时立即同步落盘，不依赖正常退出 App。旧 schema 2 安装记录直接读取，无需重装。保留上一版运行程序，但不回退官方已修改的用户数据；降级前导出重要文件。
 - 失败的候选不会成为 active。当前不自动清理旧/失败槽位，以避免误删；长期反复安装会占用额外空间。
@@ -40,8 +41,8 @@
 构建命令示例：
 
 ```powershell
-./scripts/build-release.ps1 -Abi arm64-v8a -SigningConfig <本地签名JSON> -VersionName 0.0.3 -VersionCode 5
-./scripts/build-release.ps1 -Abi x86_64 -SigningConfig <本地签名JSON> -VersionName 0.0.3 -VersionCode 5
+./scripts/build-release.ps1 -Abi arm64-v8a -SigningConfig <本地签名JSON> -VersionName 0.0.4 -VersionCode 6
+./scripts/build-release.ps1 -Abi x86_64 -SigningConfig <本地签名JSON> -VersionName 0.0.4 -VersionCode 6
 ```
 
 签名 JSON 字段：`keystore`（绝对路径）、`storePassword`、`keyAlias`、`keyPassword`。脚本仅通过当前进程环境传给 Gradle，不把密码写进源码。妥善离线备份密钥；丢失或更换签名会破坏覆盖安装和内置更新兼容性。其他贡献者需使用自己的密钥、包名与更新源，不能向原项目用户分发换签名的更新。

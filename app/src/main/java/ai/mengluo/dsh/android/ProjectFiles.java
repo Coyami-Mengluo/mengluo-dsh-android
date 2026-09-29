@@ -36,7 +36,7 @@ final class ProjectFiles {
     }
     private static boolean under(String path, String base) { return path.equals(base) || path.startsWith(base + "/"); }
     static boolean runtimePath(String path) {
-        for (String reserved : List.of("/dev", "/proc", "/sys", "/root/.dsh", "/opt", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/run"))
+        for (String reserved : List.of("/dev", "/proc", "/sys", "/root/.dsh", "/opt", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/run", "/" + ProotCompatibility.LINK_STORE))
             if (under(path, reserved)) return true;
         return false;
     }

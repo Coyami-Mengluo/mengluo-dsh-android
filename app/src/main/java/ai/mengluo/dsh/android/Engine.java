@@ -289,6 +289,7 @@ final class Engine {
         builder.environment().put("PROOT_LOADER", libs + "/libproot-loader.so");
         builder.environment().put("PROOT_TMP_DIR", context.getCacheDir().getPath());
         builder.environment().put("PROOT_NO_SECCOMP", "1");
+        ProotCompatibility.configure(builder, rootfs);
         return RuntimeProcesses.launch(builder, context.getCacheDir());
     }
     private void consume(Process process, Consumer<String> line) {

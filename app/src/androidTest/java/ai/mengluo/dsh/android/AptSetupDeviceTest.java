@@ -20,7 +20,7 @@ public class AptSetupDeviceTest {
         String archive = InstrumentationRegistry.getArguments().getString("aptFixturePath");
         assumeNotNull(archive);
         Context context = InstrumentationRegistry.getInstrumentation().getTargetContext();
-        File root = Files.createTempDirectory(context.getCacheDir().toPath(), "apt-003-test-").toFile();
+        File root = Files.createTempDirectory(context.getCacheDir().toPath(), "apt-004-test-").toFile();
         try {
             String hash = BuildConfig.RUNTIME_ABI.equals("x86_64")
                 ? "6bc2cde3930ad088b3bb46fa45279e96d25bc3810f209850ecbe4722711874f9"
@@ -53,9 +53,81 @@ public class AptSetupDeviceTest {
             assertFalse(new File(updates, "0000").exists());
             run(context, root, List.of("/usr/bin/git", "--version"), 30);
             run(context, root, List.of("/usr/bin/python3", "--version"), 30);
+            hardLinkDeniedRegression(context, root);
         } finally { removeFixture(root); }
     }
+
+    private static void hardLinkDeniedRegression(Context context, File root) throws Exception {
+        File probe = new File(root, "root/hardlink-regression"); assertTrue(probe.mkdirs());
+        try (InputStream script = InstrumentationRegistry.getInstrumentation().getContext().getAssets().open("deny-hardlinks.py")) {
+            Files.copy(script, new File(probe, "deny-hardlinks.py").toPath());
+        }
+        String guest = "/root/hardlink-regression";
+        // A negative control is mandatory: permissive emulators must really reject link(), not just pass.
+        List<String> deniedLink = denied(List.of("/usr/bin/python3", "-c",
+            "import os; open('" + guest + "/original','w').write('persistent'); os.link('" + guest + "/original','" + guest + "/linked')"));
+        CommandFailure linkFailure = assertThrows(CommandFailure.class, () -> run(context, root, deniedLink, 30, false));
+        assertTrue(linkFailure.getMessage(), linkFailure.getMessage().contains("Permission denied"));
+        assertFalse(new File(probe, "linked").exists());
+        run(context, root, deniedLink, 30);
+        // A separate PRoot process must read the same backing files after the first has exited.
+        run(context, root, denied(List.of("/usr/bin/python3", "-c",
+            "import os; assert open('" + guest + "/linked').read()=='persistent'; assert os.path.samefile('" + guest + "/original','" + guest + "/linked'); assert not os.path.islink('" + guest + "/linked')")), 30);
+
+        File database = new File(probe, "db"); assertTrue(new File(database, "updates").mkdirs());
+        assertTrue(new File(database, "info").mkdirs());
+        String record = IO.text(new File(root, "var/lib/dpkg/status")).split("\n\n", 2)[0] + "\n\n";
+        IO.text(new File(database, "status"), record); IO.text(new File(database, "updates/0000"), record);
+        List<String> configure = denied(List.of("/usr/bin/dpkg", "--admindir=" + guest + "/db", "--configure", "-a"));
+        CommandFailure dpkgFailure = assertThrows(CommandFailure.class, () -> run(context, root, configure, 30, false));
+        assertTrue(dpkgFailure.getMessage(), dpkgFailure.getMessage().contains("status-old"));
+        assertTrue(dpkgFailure.getMessage(), dpkgFailure.getMessage().contains("Permission denied"));
+        // Retry the exact failed database; never delete status/journal files to fake a recovery.
+        run(context, root, configure, 30);
+        assertTrue(new File(database, "status-old").isFile());
+        assertFalse(new File(database, "updates/0000").exists());
+        assertEquals(record, IO.text(new File(database, "status")));
+
+        // Exercise real dpkg unpack/configure and file backups too, without network or user packages.
+        File payload = new File(probe, "package"); assertTrue(new File(payload, "DEBIAN").mkdirs());
+        assertTrue(new File(payload, "opt/mengluo-hardlink-probe").mkdirs());
+        // Android cache mkdirs inherits 02700; a Debian package's control directory requires 0755.
+        for (String directory : List.of("", "DEBIAN", "opt", "opt/mengluo-hardlink-probe"))
+            android.system.Os.chmod(new File(payload, directory).getPath(), 0755);
+        for (int version = 1; version <= 2; version++) {
+            IO.text(new File(payload, "DEBIAN/control"), "Package: mengluo-hardlink-probe\nVersion: " + version
+                + "\nArchitecture: all\nMaintainer: Test <test@example.invalid>\nDescription: isolated hard-link regression\n");
+            IO.text(new File(payload, "opt/mengluo-hardlink-probe/value"), "version " + version);
+            android.system.Os.chmod(new File(payload, "DEBIAN/control").getPath(), 0644);
+            android.system.Os.chmod(new File(payload, "opt/mengluo-hardlink-probe/value").getPath(), 0644);
+            run(context, root, List.of("/usr/bin/dpkg-deb", "--build", "--root-owner-group", guest + "/package", guest + "/probe.deb"), 30);
+            run(context, root, denied(List.of("/usr/bin/dpkg", "--install", guest + "/probe.deb")), 60);
+            assertEquals("version " + version, IO.text(new File(root, "opt/mengluo-hardlink-probe/value")));
+        }
+        run(context, root, denied(List.of("/usr/bin/dpkg", "--audit")), 30);
+        android.util.Log.i("MengLuoAptTest", "HARDLINK_DENIED_REGRESSION_OK: negative controls failed; same database retry and package upgrade passed");
+    }
+    private static List<String> denied(List<String> command) {
+        ArrayList<String> result = new ArrayList<>(List.of("/usr/bin/python3", "/root/hardlink-regression/deny-hardlinks.py"));
+        result.addAll(command); return result;
+    }
+
+    @Test public void linkBackingStoreRefusesSymlinksWithoutTouchingTheirTarget() throws Exception {
+        Context context = InstrumentationRegistry.getInstrumentation().getTargetContext();
+        File fixture = Files.createTempDirectory(context.getCacheDir().toPath(), "l2s-store-test-").toFile();
+        try {
+            File root = new File(fixture, "rootfs"), outside = new File(fixture, "outside");
+            assertTrue(root.mkdir()); assertTrue(outside.mkdir());
+            IO.text(new File(outside, "keep"), "unchanged");
+            Files.createSymbolicLink(new File(root, ProotCompatibility.LINK_STORE).toPath(), outside.toPath());
+            assertThrows(IOException.class, () -> ProotCompatibility.configure(new ProcessBuilder("proot"), root));
+            assertEquals("unchanged", IO.text(new File(outside, "keep"))); assertEquals(1, outside.list().length);
+        } finally { removeFixture(fixture); }
+    }
     private static void run(Context context, File root, List<String> command, int seconds) throws Exception {
+        run(context, root, command, seconds, true);
+    }
+    private static void run(Context context, File root, List<String> command, int seconds, boolean compatibility) throws Exception {
         String libs = context.getApplicationInfo().nativeLibraryDir;
         ArrayList<String> args = new ArrayList<>(List.of(libs + "/libproot.so", "--kill-on-exit", "-0", "-r", root.getPath(),
             "-b", "/dev", "-b", "/proc", "-b", "/sys", "-w", "/root", "/usr/bin/env", "-i",
@@ -66,6 +138,7 @@ public class AptSetupDeviceTest {
         builder.environment().put("LD_PRELOAD", libs + "/libtalloc.so:" + libs + "/libandroid-shmem.so");
         builder.environment().put("PROOT_LOADER", libs + "/libproot-loader.so");
         builder.environment().put("PROOT_TMP_DIR", context.getCacheDir().getPath()); builder.environment().put("PROOT_NO_SECCOMP", "1");
+        if (compatibility) ProotCompatibility.configure(builder, root);
         Process process = RuntimeProcesses.launch(builder, context.getCacheDir());
         ExecutorService reader = Executors.newSingleThreadExecutor(); CommandFailure.Output tail = new CommandFailure.Output();
         Future<?> output = reader.submit(() -> {

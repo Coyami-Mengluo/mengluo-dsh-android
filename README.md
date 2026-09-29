@@ -53,6 +53,8 @@ node scripts/verify-apk.mjs arm64-v8a
 
 设备集成测试运行在 App UID 内，检查解压安装、Node 执行代码写文件、npm/pnpm 镜像、Harness HTTP 与前端就绪及停止后保留文件。不消耗模型额度，不替代真实模型工具调用、后台保活或真实手机测试。
 
+`AptSetupDeviceTest` 可通过 instrumentation 参数 `aptFixturePath` 指定已校验的 Ubuntu Base 归档，在全新缓存目录中测试真实依赖安装。测试专用 seccomp 过滤器仅拒绝该子进程树的原生 `link/linkat`：先确认关闭兼容会出现 `status-old: Permission denied`，再确认开启兼容后同一失败数据库可以恢复、软件包可以安装和升级。过滤器按实际 ELF 架构选择，避免模拟器伪装的 `uname` 误导；不改 SELinux、不申请 Root，也不操作用户的包数据库。`UpgradeRetentionTest` 的 `upgradeRetentionPhase=prepare/verify` 可在覆盖安装前后核对运行版本状态、临时项目文件和下载源保留情况。
+
 先构建 `assembleDebug,assembleDebugAndroidTest`，再运行 `./scripts/device-smoke.ps1`。其中界面用例覆盖横竖屏、深色模式及模拟的手势条 / 侧边导航栏 / 键盘安全区，验证重复分发不会叠加留白。MuMu 当前隐藏系统导航栏，因此这不等于手势导航真机实测。`node scripts/read-ui-verification.mjs` 可取回界面测试截图到 `.tools/verification/`。
 
 MuMu 自带的旧 WebView 缺少 `Promise.withResolvers` 和 `AbortSignal.any`。App 仅在当前 Harness 本地 origin 的文档启动阶段补齐这两个缺失接口，已有原生接口不覆盖，不修改官方文件或增加原生权限桥接；兼容脚本测试：`node --test scripts/web-compat.test.mjs`。它不替代浏览器安全更新，也不代表兼容任意老旧 WebView。
