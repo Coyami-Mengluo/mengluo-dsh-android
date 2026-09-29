@@ -1,4 +1,4 @@
-param([ValidateSet('x86_64','arm64-v8a')][string]$Abi='arm64-v8a', [string]$SigningConfig, [string]$VersionName='0.0.1', [int]$VersionCode=2)
+param([ValidateSet('x86_64','arm64-v8a')][string]$Abi='arm64-v8a', [string]$SigningConfig, [string]$VersionName='0.0.2', [int]$VersionCode=3)
 $ErrorActionPreference='Stop'
 if (!$SigningConfig) { throw 'Provide a local, ignored signing JSON (keystore, storePassword, keyAlias, keyPassword). Never commit this file.' }
 $private = Get-Content -LiteralPath $SigningConfig -Raw | ConvertFrom-Json
