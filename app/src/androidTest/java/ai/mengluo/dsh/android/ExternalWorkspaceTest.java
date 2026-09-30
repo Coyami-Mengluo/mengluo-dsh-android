@@ -6,6 +6,9 @@ import android.os.Environment;
 import android.view.*;
 import android.view.inspector.WindowInspector;
 import android.widget.*;
+import android.webkit.*;
+import androidx.webkit.WebViewCompat;
+import androidx.webkit.WebViewFeature;
 import androidx.test.core.app.ActivityScenario;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
@@ -50,30 +53,33 @@ public class ExternalWorkspaceTest {
             for (Path path : paths.sorted(Comparator.reverseOrder()).toArray(Path[]::new)) Files.deleteIfExists(path);
         }
     }
-    private WorkspaceStore store() { return new WorkspaceStore(preferences, Environment.getExternalStorageDirectory(), Environment::isExternalStorageManager); }
+    private ProjectFiles files(java.util.function.BooleanSupplier allowed) {
+        return new ProjectFiles(working, privateFixture, new File("/storage"), Environment.getExternalStorageDirectory(), allowed);
+    }
 
-    @Test public void selectionPersistsAndRevokedPermissionNeverFallsBack() throws Exception {
-        AtomicBoolean allowed = new AtomicBoolean(true);
-        WorkspaceStore store = new WorkspaceStore(preferences, Environment.getExternalStorageDirectory(), allowed::get); store.select(project);
-        assertEquals(project.getCanonicalFile(), store().active());
-        allowed.set(false);
-        assertThrows(IOException.class, store::active); assertEquals(project.getCanonicalFile(), store().selected());
-        // An explicit return to the private directory is allowed without broad file access.
-        store.select(null); assertNull(store.active()); assertEquals("/workspace", store.guestPath());
-        assertTrue(project.exists());
+    @Test public void oldSelectedDirectoryIsNotUsedAsAnAccessRestriction() throws Exception {
+        String missing = new File(publicFixture, "old-missing-project").getPath();
+        assertTrue(preferences.edit().putString("directory", missing).commit());
+        WorkspaceStore store = new WorkspaceStore(new ContextWrapper(context) {
+            @Override public SharedPreferences getSharedPreferences(String name, int mode) { return preferences; }
+        });
+        ArrayList<String> arguments = new ArrayList<>(); store.addBindings(arguments, privateFixture);
+        assertTrue(arguments.contains("/storage:/storage")); assertFalse(arguments.stream().anyMatch(s -> s.contains(missing)));
+        assertEquals(missing, preferences.getString("directory", "")); assertFalse(new File(missing).exists());
     }
     @Test public void movedFolderFailsWithoutRecreationAndDefaultIsNotRemapped() throws Exception {
-        WorkspaceStore store = store(); store.select(project); IO.text(new File(project, "keep.txt"), "original");
+        IO.text(new File(project, "keep.txt"), "original");
         File renamed = new File(publicFixture, "renamed"); assertTrue(project.renameTo(renamed));
-        assertThrows(IOException.class, store::active); assertFalse(project.exists());
+        assertFalse(project.exists());
         assertEquals("original", IO.text(new File(renamed, "keep.txt")));
-        ProjectFiles files = new ProjectFiles(working, privateFixture, renamed, () -> true);
+        ProjectFiles files = files(() -> true);
         assertEquals(working, files.resolve(new ProjectFiles.Project("private", "/workspace"), ""));
-        assertThrows(IOException.class, () -> files.resolve(new ProjectFiles.Project("old", project.getPath()), "keep.txt"));
+        assertThrows(IOException.class, () -> files.directory(new ProjectFiles.Project("old", project.getPath()), ""));
+        assertEquals("original", files.readText(new ProjectFiles.Project("new", renamed.getPath()), "keep.txt"));
     }
     @Test public void publicEditorImportExportUseOriginalFilesAndHonorPermission() throws Exception {
         AtomicBoolean allowed = new AtomicBoolean(true);
-        ProjectFiles files = new ProjectFiles(working, privateFixture, project, allowed::get);
+        ProjectFiles files = files(allowed::get);
         ProjectFiles.Project entry = new ProjectFiles.Project("public", project.getPath());
         files.importFile(entry, "", "source.js", new ByteArrayInputStream("console.log(1)".getBytes(StandardCharsets.UTF_8)), context.getCacheDir());
         files.saveText(entry, "source.js", "console.log(1)", "console.log(42)");
@@ -85,7 +91,7 @@ public class ExternalWorkspaceTest {
         allowed.set(false); assertThrows(IOException.class, () -> files.readText(entry, "source.js"));
         allowed.set(true); assertEquals("console.log(42)", files.readText(entry, "source.js"));
     }
-    @Test public void nodePythonBashNpmAndLocalServerRunInRealSelectedDirectory() throws Exception {
+    @Test public void sameProcessRunsMultiplePublicProjectsWithNodePythonBashNpmAndLocalServer() throws Exception {
         Engine engine = new Engine(context); assertTrue("Install the runtime in the test emulator first", engine.installed());
         assertTrue("Runs as the app UID", android.os.Process.myUid() >= 10000);
         IO.text(new File(working, "private-marker.txt"), "private-original");
@@ -99,64 +105,129 @@ public class ExternalWorkspaceTest {
         File pkg = new File(project, "fixture-package"); assertTrue(pkg.mkdir());
         IO.text(new File(pkg, "package.json"), "{\"name\":\"mengluo-test-local\",\"version\":\"1.0.0\",\"main\":\"index.js\"}");
         IO.text(new File(pkg, "index.js"), "module.exports=42;\n");
-        String command = "set -e\nnode run.cjs\nbash run.sh\npython3 -c 'open(\"output/python.txt\",\"w\").write(\"python-ok\")'\n"
+        File second = new File(publicFixture, "second-project"); assertTrue(second.mkdir());
+        String command = "set -e\ntest \"$PWD\" = /workspace\ncd " + RuntimePolicy.quote(project.getPath()) + "\nnode run.cjs\nbash run.sh\npython3 -c 'open(\"output/python.txt\",\"w\").write(\"python-ok\")'\n"
             + "test \"$(cat /workspace/private-marker.txt)\" = private-original\n"
             + "npm pack ./fixture-package --ignore-scripts --offline\n"
             + "npm install ./mengluo-test-local-1.0.0.tgz --ignore-scripts --offline --no-audit --no-fund\n"
-            + "node -e 'if(require(\"mengluo-test-local\")!==42)process.exit(1)'\necho EXTERNAL_WORKSPACE_EXECUTION_OK\n";
-        String output = run(engine, List.of("/bin/bash", "-lc", command), project);
+            + "node -e 'if(require(\"mengluo-test-local\")!==42)process.exit(1)'\n"
+            + "cd " + RuntimePolicy.quote(second.getPath()) + "\nnode -e 'require(\"fs\").writeFileSync(\"second.txt\",\"second-ok\")'\n"
+            + "test \"$(cat " + RuntimePolicy.quote("/sdcard/" + publicFixture.getName() + "/" + project.getName() + "/input.txt") + ")\" = read-from-public\n"
+            + "test \"$(cat " + RuntimePolicy.quote("/storage/self/primary/" + publicFixture.getName() + "/second-project/second.txt") + ")\" = second-ok\n"
+            + "echo EXTERNAL_WORKSPACE_EXECUTION_OK\n";
+        String output = run(engine, List.of("/bin/bash", "-lc", command), true);
         assertTrue(output, output.contains("EXTERNAL_WORKSPACE_EXECUTION_OK"));
         org.json.JSONObject result = new org.json.JSONObject(IO.text(new File(project, "output/node.json")));
         assertEquals(project.getCanonicalPath(), result.getString("cwd")); assertTrue(result.getBoolean("server"));
         assertEquals("bash-ok", IO.text(new File(project, "output/bash.txt"))); assertEquals("python-ok", IO.text(new File(project, "output/python.txt")));
+        assertEquals("second-ok", IO.text(new File(second, "second.txt")));
         assertEquals("private-original", IO.text(new File(working, "private-marker.txt"))); assertFalse(new File(working, "output").exists());
     }
-    @Test public void harnessStartsWithPublicCwdAndIsolatedProfile() throws Exception {
+    @Test public void harnessStartsWithPhoneStorageAndIsolatedProfile() throws Exception {
         Engine engine = new Engine(context); assertTrue(engine.installed());
         RuntimeStore.Slot slot = engine.versions.active();
-        Process process = engine.spawn(List.of("/opt/node/bin/node", "--expose-internals", slot.cli(), "web", "--host", "127.0.0.1", "--port", "0", "--no-open"), home, working, profile, project);
+        Process process = engine.spawn(List.of("/opt/node/bin/node", "--expose-internals", slot.cli(), "web", "--host", "127.0.0.1", "--port", "0", "--no-open"), home, working, profile, true);
         ExecutorService reader = Executors.newSingleThreadExecutor(); BlockingQueue<String> urls = new LinkedBlockingQueue<>();
         reader.submit(() -> { try (BufferedReader input = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
             String line; while ((line = input.readLine()) != null) { String url = Engine.readyAddress(line); if (url != null) urls.offer(url); }
         } catch (IOException ignored) { } });
-        try { String url = urls.poll(120, TimeUnit.SECONDS); assertNotNull("Harness must announce its web address", url); HarnessPage.check(url); }
+        try {
+            String url = urls.poll(120, TimeUnit.SECONDS); assertNotNull("Harness must announce its web address", url); HarnessPage.check(url);
+            checkPickerDefaults(url);
+        }
         finally { assertTrue(RuntimeProcesses.stopAndWait(process, 5)); reader.shutdownNow(); }
     }
-    @Test public void settingsAndFolderPickerRenderAndCancelWithoutChangingSelection() throws Exception {
-        String original = new WorkspaceStore(context).guestPath();
-        AtomicReference<WorkspaceDialog> dialog = new AtomicReference<>();
-        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
-            scenario.onActivity(activity -> { dialog.set(new WorkspaceDialog(activity, Engine.get(activity), null, () -> fail("Must not switch without confirmation"))); dialog.get().show(); });
-            snapshot("workspace-settings");
-            scenario.onActivity(activity -> { dialog.get().close(); dialog.set(new WorkspaceDialog(activity, Engine.get(activity), null, () -> fail())); dialog.get().browse(publicFixture, 0); });
-            Thread.sleep(700); snapshot("workspace-picker");
-            scenario.onActivity(activity -> dialog.get().close());
-        }
-        assertEquals(original, new WorkspaceStore(context).guestPath());
-    }
-    @Test public void pickerConfirmationPersistsOnlyChosenProjectAndBusyChangeIsRejected() throws Exception {
-        Engine isolated = new Engine(new ContextWrapper(context) {
-            @Override public File getFilesDir() { return privateFixture; }
-            @Override public SharedPreferences getSharedPreferences(String name, int mode) {
-                return name.equals("workspaces") ? preferences : super.getSharedPreferences(name, mode);
-            }
-        });
-        CountDownLatch saved = new CountDownLatch(1); AtomicReference<WorkspaceDialog> dialog = new AtomicReference<>();
+    private void checkPickerDefaults(String url) throws Exception {
+        AtomicReference<WebView> browser = new AtomicReference<>();
+        AtomicReference<androidx.webkit.ScriptHandler> injection = new AtomicReference<>();
+        CountDownLatch loaded = new CountDownLatch(1);
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
             scenario.onActivity(activity -> {
-                dialog.set(new WorkspaceDialog(activity, isolated, null, saved::countDown)); dialog.get().browse(project, 0);
+                WebView view = new WebView(activity); browser.set(view); view.getSettings().setJavaScriptEnabled(true);
+                view.getSettings().setDomStorageEnabled(true);
+                assertTrue(WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT));
+                try (InputStream input = context.getAssets().open("web-compat.js")) {
+                    String script = new String(IO.bytes(input), StandardCharsets.UTF_8) + "\n"
+                        + DirectoryDefaults.script(context, Environment.getExternalStorageDirectory());
+                    String origin = "http://127.0.0.1:" + android.net.Uri.parse(url).getPort();
+                    injection.set(WebViewCompat.addDocumentStartJavaScript(view, script, Set.of(origin)));
+                } catch (IOException error) { throw new AssertionError(error); }
+                view.setWebViewClient(new WebViewClient() {
+                    @Override public void onPageFinished(WebView view, String address) { loaded.countDown(); }
+                });
+                FrameLayout frame = activity.findViewById(android.R.id.content).findViewWithTag("shell-frame");
+                frame.addView(view, new FrameLayout.LayoutParams(-1, -1)); view.loadUrl(url);
             });
-            awaitButton("使用此文件夹"); clickButton("使用此文件夹");
-            assertNull(isolated.workspaces.selected()); // Choosing a row isn't consent to switch.
-            clickButton("确认切换"); assertTrue("Directory switch must finish", saved.await(15, TimeUnit.SECONDS));
-            assertEquals(project.getCanonicalFile(), store().active());
-            isolated.busy = true;
-            AtomicReference<String> rejected = new AtomicReference<>(); isolated.changeWorkspace(null, false, rejected::set);
-            assertNotNull(rejected.get()); assertEquals(project.getCanonicalFile(), store().selected()); isolated.busy = false;
-            scenario.onActivity(activity -> { dialog.get().show(); }); snapshot("workspace-selected");
+            try {
+                assertTrue("Isolated official page must load", loaded.await(30, TimeUnit.SECONDS));
+                for (String path : new String[]{null, "/root", "/workspace", "/"}) {
+                    String payload = path == null ? "{}" : new org.json.JSONObject().put("path", path).toString();
+                    String script = "window.__pickerProbe=null;(async()=>{try{const r=await fetch('api/directoryPicker/list',"
+                        + "{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({type:'client-request',rpcId:crypto.randomUUID(),method:'directoryPicker/list',payload:{args:"
+                        + payload + "}})});const data=await r.json();window.__pickerProbe=JSON.stringify({ok:data.result.ok,path:data.result.value?.path,home:data.result.value?.home});"
+                        + "}catch(e){window.__pickerProbe=JSON.stringify({ok:false,error:String(e)})}})()";
+                    scenario.onActivity(activity -> browser.get().evaluateJavascript(script, null));
+                    String response = null; long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
+                    while (System.nanoTime() < until) {
+                        CountDownLatch done = new CountDownLatch(1); AtomicReference<String> result = new AtomicReference<>();
+                        scenario.onActivity(activity -> browser.get().evaluateJavascript("window.__pickerProbe", value -> { result.set(value); done.countDown(); }));
+                        assertTrue(done.await(5, TimeUnit.SECONDS));
+                        if (!"null".equals(result.get())) { response = new org.json.JSONArray("[" + result.get() + "]").getString(0); break; }
+                        Thread.sleep(100);
+                    }
+                    assertNotNull("Official directory listing must finish", response);
+                    org.json.JSONObject result = new org.json.JSONObject(response);
+                    assertTrue(response, result.getBoolean("ok"));
+                    assertEquals(path == null ? Environment.getExternalStorageDirectory().getPath() : path, result.getString("path"));
+                    assertEquals("Linux HOME must remain private", "/root", result.getString("home"));
+                }
+                // Exercise the official UI as well, so a changed/custom RPC transport cannot make
+                // the direct fetch probe above pass while the actual picker still opens /root.
+                awaitPage(scenario, browser, "(()=>{const b=document.querySelector('button[aria-label=\"添加工作区\"],button[aria-label=\"Add workspace\"]');"
+                    + "if(!b||b.disabled)return false;b.click();return true})()", "Official Add workspace button");
+                awaitPage(scenario, browser, "(()=>{const b=document.querySelector('button[aria-label=\"编辑路径\"],button[aria-label=\"Edit path\"]');"
+                    + "if(!b?.closest('[role=\"dialog\"]')?.querySelector('[role=\"navigation\"] button'))return false;"
+                    + "if(!b||b.disabled)return false;b.click();return true})()", "Official directory picker");
+                String expected = org.json.JSONObject.quote(Environment.getExternalStorageDirectory().getPath() + "/");
+                awaitPage(scenario, browser, "(()=>{const input=document.querySelector('input[aria-label=\"编辑路径\"],input[aria-label=\"Edit path\"]');"
+                    + "return input?.value===" + expected + "})()", "Official picker starts in phone storage");
+            } finally {
+                scenario.onActivity(activity -> { if (injection.get() != null) injection.get().remove(); browser.get().destroy(); });
+            }
+        }
+    }
+    private void awaitPage(ActivityScenario<MainActivity> scenario, AtomicReference<WebView> browser, String script, String description) throws Exception {
+        long until = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+        while (System.nanoTime() < until) {
+            CountDownLatch done = new CountDownLatch(1); AtomicReference<String> result = new AtomicReference<>();
+            scenario.onActivity(activity -> browser.get().evaluateJavascript(script, value -> { result.set(value); done.countDown(); }));
+            assertTrue(description + " script must finish", done.await(5, TimeUnit.SECONDS));
+            if ("true".equals(result.get())) return;
+            Thread.sleep(100);
+        }
+        CountDownLatch done = new CountDownLatch(1); AtomicReference<String> diagnostic = new AtomicReference<>();
+        scenario.onActivity(activity -> browser.get().evaluateJavascript("JSON.stringify({dialogs:[...document.querySelectorAll('[role=\"dialog\"]')].map(d=>({title:d.querySelector('h2')?.textContent,navigation:!!d.querySelector('[role=\"navigation\"]')})),controls:[...document.querySelectorAll('button[aria-label]')].map(b=>({label:b.getAttribute('aria-label'),disabled:b.disabled})).slice(-30)})", value -> { diagnostic.set(value); done.countDown(); }));
+        assertTrue(done.await(5, TimeUnit.SECONDS));
+        fail(description + ": " + diagnostic.get());
+    }
+    @Test public void permissionPageHasNoProjectSelectionAndCancelLeavesSettingsAlone() throws Exception {
+        Map<String, ?> original = new HashMap<>(context.getSharedPreferences("workspaces", 0).getAll());
+        AtomicReference<WorkspaceDialog> dialog = new AtomicReference<>();
+        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            scenario.onActivity(activity -> { dialog.set(new WorkspaceDialog(activity, Engine.get(activity), null, () -> {})); dialog.get().show(); });
+            snapshot("storage-settings");
+            assertFalse(clickButtonIfPresent("选择手机文件夹", false)); assertFalse(clickButtonIfPresent("使用应用内工作目录", false));
+            clickButton("管理文件权限"); snapshot("storage-permission-confirmation"); clickButton("取消");
             scenario.onActivity(activity -> dialog.get().close());
         }
-        assertTrue(project.isDirectory()); assertTrue(working.isDirectory());
+        assertEquals(original, context.getSharedPreferences("workspaces", 0).getAll());
+    }
+    @Test public void installationAndSmokeModeDoNotMountPhoneFiles() throws Exception {
+        IO.text(new File(project, "private-to-install-test.txt"), "keep");
+        Engine engine = new Engine(context);
+        String result = run(engine, List.of("/bin/bash", "-lc", "test ! -e " + RuntimePolicy.quote(new File(project, "private-to-install-test.txt").getPath()) + " && echo ISOLATED_INSTALL_OK"), false);
+        assertTrue(result, result.contains("ISOLATED_INSTALL_OK"));
+        assertEquals("keep", IO.text(new File(project, "private-to-install-test.txt")));
     }
     private static View button(View view, String text) {
         if (view instanceof Button && ((Button) view).getText().toString().equals(text) && view.isShown()) return view;
@@ -176,8 +247,8 @@ public class ExternalWorkspaceTest {
         while (!clickButtonIfPresent(text, false)) { assertTrue("Missing button: " + text, System.nanoTime() < until); Thread.sleep(100); }
     }
     private static void clickButton(String text) throws Exception { awaitButton(text); assertTrue(clickButtonIfPresent(text, true)); }
-    private String run(Engine engine, List<String> command, File external) throws Exception {
-        Process process = engine.spawn(command, home, working, profile, external);
+    private String run(Engine engine, List<String> command, boolean phoneStorage) throws Exception {
+        Process process = engine.spawn(command, home, working, profile, phoneStorage);
         ExecutorService reader = Executors.newSingleThreadExecutor(); Future<String> output = reader.submit(() -> new String(IO.bytes(process.getInputStream()), StandardCharsets.UTF_8));
         try {
             assertTrue("Command timeout", process.waitFor(120, TimeUnit.SECONDS)); String text = output.get(10, TimeUnit.SECONDS);

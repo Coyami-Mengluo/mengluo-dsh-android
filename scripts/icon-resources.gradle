@@ -1,0 +1,49 @@
+import java.awt.AlphaComposite
+import java.awt.RenderingHints
+import java.awt.image.BufferedImage
+import javax.imageio.ImageIO
+
+// Derive display-sized resources from the unchanged master, not from an already-small icon.
+// No image editor or network dependency is needed; this runs with the build's existing JDK.
+def iconSource = rootProject.file('artwork/app-icon.png')
+def iconOutput = layout.buildDirectory.dir('generated/iconResources')
+tasks.register('generateIconResources') {
+    inputs.file(iconSource)
+    inputs.file(rootProject.file('scripts/icon-resources.gradle'))
+    outputs.dir(iconOutput)
+    doLast {
+        def original = ImageIO.read(iconSource)
+        if (original == null || original.width != original.height || original.width < 272)
+            throw new GradleException('The icon master must be a square PNG of at least 272 pixels')
+
+        def resize = { int size ->
+            BufferedImage current = original
+            // Several small reductions avoid the aliasing caused by sampling 1254px straight to 34px.
+            while (current.width != size) {
+                int nextSize = Math.max(size, (int) Math.floor(current.width / 2d))
+                def next = new BufferedImage(nextSize, nextSize, BufferedImage.TYPE_INT_ARGB_PRE)
+                def canvas = next.createGraphics()
+                try {
+                    canvas.composite = AlphaComposite.Src
+                    canvas.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BICUBIC)
+                    canvas.setRenderingHint(RenderingHints.KEY_ALPHA_INTERPOLATION, RenderingHints.VALUE_ALPHA_INTERPOLATION_QUALITY)
+                    canvas.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY)
+                    canvas.drawImage(current, 0, 0, nextSize, nextSize, null)
+                } finally { canvas.dispose() }
+                if (current != original) current.flush()
+                current = next
+            }
+            return current
+        }
+        [mdpi: 1d, hdpi: 1.5d, xhdpi: 2d, xxhdpi: 3d, xxxhdpi: 4d].each { density, scale ->
+            [['drawable', 'app_icon_bitmap', 68], ['drawable', 'menu_icon_bitmap', 34], ['mipmap', 'ic_launcher_bitmap', 48]].each { spec ->
+                def directory = new File(iconOutput.get().asFile, "${spec[0]}-${density}")
+                if (!directory.isDirectory() && !directory.mkdirs()) throw new GradleException("Cannot create ${directory}")
+                def bitmap = resize((int) Math.round(spec[2] * scale))
+                try { ImageIO.write(bitmap, 'png', new File(directory, "${spec[1]}.png")) }
+                finally { bitmap.flush() }
+            }
+        }
+        original.flush()
+    }
+}

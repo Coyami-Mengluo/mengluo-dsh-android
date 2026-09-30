@@ -26,8 +26,8 @@ android {
         applicationId 'ai.mengluo.dsh.android'
         minSdk 30
         targetSdk 35
-        versionCode providers.gradleProperty('clientVersionCode').orElse('7').get().toInteger()
-        versionName providers.gradleProperty('clientVersionName').orElse('0.0.5').get()
+        versionCode providers.gradleProperty('clientVersionCode').orElse('8').get().toInteger()
+        versionName providers.gradleProperty('clientVersionName').orElse('0.0.6').get()
         ndk { abiFilters runtimeAbi }
         buildConfigField 'String', 'RUNTIME_ABI', "\"${runtimeAbi}\""
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
@@ -36,6 +36,7 @@ android {
     sourceSets {
         main {
             assets.srcDirs = [layout.buildDirectory.dir('generated/publicAssets')]
+            res.srcDir(layout.buildDirectory.dir('generated/iconResources'))
             jniLibs.srcDirs = [new File(runtimeStage, 'jniLibs')]
         }
     }
@@ -87,7 +88,8 @@ tasks.register('collectLibraryNotices') {
         notice.get().asFile.parentFile.mkdirs(); notice.get().asFile.setText(text.toString(), 'UTF-8')
     }
 }
-tasks.named('preBuild').configure { dependsOn('stagePublicAssets') }
+apply from: rootProject.file('scripts/icon-resources.gradle')
+tasks.named('preBuild').configure { dependsOn('stagePublicAssets', 'generateIconResources') }
 
 dependencies {
     implementation 'androidx.webkit:webkit:1.12.1'

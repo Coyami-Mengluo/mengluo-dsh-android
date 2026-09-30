@@ -55,5 +55,7 @@ for (const item of lock.assets) {
 assert.ok(entries.includes('assets/runtime-verify.mjs'))
 assert.ok(entries.includes('assets/web-compat.js'))
 assert.ok(entries.includes('assets/permission-hint.js'))
+assert.ok(entries.includes('assets/file-open.js'))
+assert.ok(entries.includes('assets/directory-default.js'))
 for (const name of ['proot', 'libtalloc', 'libandroid-shmem']) assert.ok(entries.includes(`assets/notices/${name}-copyright.txt`))
 console.log(`APK structure, checksums and ${abi} runtime verified. SHA256 ${digest(readFileSync(apk))}`)

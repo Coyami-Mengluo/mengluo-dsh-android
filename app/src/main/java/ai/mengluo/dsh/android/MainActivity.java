@@ -17,6 +17,7 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.appcompat.app.AlertDialog;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
+import androidx.core.view.OneShotPreDrawListener;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.webkit.ScriptHandler;
@@ -33,14 +34,18 @@ import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
-/** Native setup/workspace plus the official local web UI; no privileged JavaScript bridge. */
+/** Native setup plus the official UI; file-opening requests always require native confirmation. */
 public final class MainActivity extends AppCompatActivity {
     private Engine engine;
     private Ui ui;
     private FrameLayout frame;
     private LinearLayout home;
     private WebView web;
+    private PageZoom pageZoom;
+    private SystemFiles systemFiles;
+    private WebFiles webFiles;
     private ImageButton ball;
     private TextView state, statusChip, runtimeVersion;
     private Button updatesButton;
@@ -61,7 +66,6 @@ public final class MainActivity extends AppCompatActivity {
     private ProjectBrowser projectBrowser;
     private WorkspaceDialog workspaceDialog;
     private TextView workspacePath;
-    private File browserExternal;
     private LogExporter logExporter;
     private PermissionHelp permissionHelp;
     private boolean ballCollapsed, ballTouching, ballMenuOpen;
@@ -85,9 +89,8 @@ public final class MainActivity extends AppCompatActivity {
         ballCollapsed = saved != null && saved.getBoolean("ball-collapsed", false);
         ui = new Ui(this);
         permissionHelp = new PermissionHelp(this, ui);
-        browserExternal = engine.workspaces.selected();
         projectBrowser = createProjectBrowser(saved);
-        workspaceDialog = new WorkspaceDialog(this, engine, saved, () -> { refresh(); showHome(); });
+        workspaceDialog = new WorkspaceDialog(this, engine, saved, this::refresh);
         logExporter = new LogExporter(this, engine, saved);
         frame = new FrameLayout(this); frame.setBackgroundColor(ui.color(R.color.page));
         frame.setTag("shell-frame");
@@ -107,6 +110,9 @@ public final class MainActivity extends AppCompatActivity {
         boolean light = getResources().getBoolean(R.bool.light_system_bars);
         bars.setAppearanceLightStatusBars(light); bars.setAppearanceLightNavigationBars(light);
         web = new WebView(this); web.setTag("harness-web"); web.setVisibility(View.GONE);
+        pageZoom = new PageZoom(this, web, () -> engine.readyUrl);
+        systemFiles = new SystemFiles(this, projectFiles());
+        webFiles = new WebFiles(web, () -> engine.readyUrl, systemFiles, () -> projectBrowser.showProjects());
         web.getSettings().setJavaScriptEnabled(true); web.getSettings().setDomStorageEnabled(true);
         web.getSettings().setAllowFileAccess(false); web.getSettings().setAllowContentAccess(false);
         web.getSettings().setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
@@ -130,6 +136,7 @@ public final class MainActivity extends AppCompatActivity {
             }
             @Override public void onPageFinished(WebView view, String url) {
                 if (engine.readyUrl != null && RuntimePolicy.trustedPage(url, engine.readyUrl)) {
+                    pageZoom.apply(); webFiles.finished(url);
                     view.evaluateJavascript("JSON.stringify({title:document.title,promise:typeof Promise.withResolvers,abort:typeof AbortSignal.any})", value -> engine.note("[web] 浏览器接口检查：" + value));
                     permissionHelp.observePage(view, url, engine.readyUrl);
                 }
@@ -191,9 +198,9 @@ public final class MainActivity extends AppCompatActivity {
         download.addView(ui.caption("为基础环境、安装依赖、Harness 和 npm 插件选择下载线路。")); ui.gap(download, 6);
         sourceButton = ui.button(engine.downloadSource().title, R.drawable.ic_download, false, this::downloads);
         download.addView(sourceButton, new LinearLayout.LayoutParams(-1, -2)); panels.addView(download);
-        LinearLayout directory = ui.card(); directory.addView(label("工作目录", 17, true));
-        workspacePath = ui.caption(engine.workspaces.guestPath()); workspacePath.setTextIsSelectable(true); directory.addView(workspacePath);
-        directory.addView(ui.button("选择工作目录", R.drawable.ic_workspace, false, workspaceDialog::show), new LinearLayout.LayoutParams(-1, -2));
+        LinearLayout directory = ui.card(); directory.addView(label("手机文件访问", 17, true));
+        workspacePath = ui.caption(""); directory.addView(workspacePath);
+        directory.addView(ui.button("文件权限", R.drawable.ic_workspace, false, workspaceDialog::show), new LinearLayout.LayoutParams(-1, -2));
         panels.addView(directory);
         updatesButton = ui.button("更新管理", R.drawable.ic_download, false, updatesDialog::show);
         panels.addView(updatesButton, new LinearLayout.LayoutParams(-1, -2));
@@ -218,11 +225,7 @@ public final class MainActivity extends AppCompatActivity {
     }
     private void refresh() {
         if (isDestroyed()) return;
-        File selected = engine.workspaces.selected();
-        if (!Objects.equals(browserExternal, selected)) {
-            projectBrowser.close(); browserExternal = selected; projectBrowser = createProjectBrowser(null);
-        }
-        workspacePath.setText(engine.workspaces.guestPath() + (selected == null ? " · 应用内" : " · 手机公共目录"));
+        workspacePath.setText(engine.workspaces.hasAccess() ? "已授权 · 直接在 Harness 中选择项目路径" : "授权后可在 Harness 中选择手机公共目录");
         state.setText(engine.status); progress.setVisibility(engine.busy ? View.VISIBLE : View.GONE);
         sourceButton.setText(engine.downloadSource().title);
         sourceButton.setEnabled(!engine.busy && !engine.checkingSource);
@@ -236,11 +239,14 @@ public final class MainActivity extends AppCompatActivity {
         launch.setText(engine.readyUrl != null ? "回到 Harness" : "启动 Harness");
         if (engine.readyUrl != null && !engine.readyUrl.equals(loadedUrl)) {
             loadedUrl = engine.readyUrl;
+            try { webFiles.install(loadedUrl); }
+            catch (IOException error) { engine.note("系统文件打开适配未加载：" + error.getMessage()); }
             if (compatibilityScript != null) { compatibilityScript.remove(); compatibilityScript = null; }
             if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
                 try (InputStream input = getAssets().open("web-compat.js")) {
                     String origin = "http://127.0.0.1:" + Uri.parse(loadedUrl).getPort();
-                    compatibilityScript = WebViewCompat.addDocumentStartJavaScript(web, new String(IO.bytes(input), StandardCharsets.UTF_8), Set.of(origin));
+                    String script = new String(IO.bytes(input), StandardCharsets.UTF_8) + "\n" + DirectoryDefaults.script(this, engine.workspaces.sharedRoot);
+                    compatibilityScript = WebViewCompat.addDocumentStartJavaScript(web, script, Set.of(origin));
                 } catch (Exception error) { engine.note("浏览器兼容处理失败：" + error.getMessage()); }
             } else engine.note("当前 WebView 不支持启动兼容脚本；若页面提示重连，请更新 Android System WebView");
             web.loadUrl(loadedUrl); showHarness();
@@ -253,10 +259,12 @@ public final class MainActivity extends AppCompatActivity {
     }
     private void showHome() { permissionHelp.dismissNotice(); frame.findViewWithTag("home").setVisibility(View.VISIBLE); web.setVisibility(View.GONE); ball.bringToFront(); }
     private void addBall() {
-        ball = new ImageButton(this); ball.setImageResource(R.drawable.app_icon); ball.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        ball.setTag("menu-ball"); ball.setContentDescription("MengLuo 菜单"); ball.setPadding(dp(6), dp(6), dp(6), dp(6)); ball.setElevation(dp(6));
+        ball = new ImageButton(this); ball.setImageResource(R.drawable.menu_icon); ball.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        ball.setTag("menu-ball"); ball.setContentDescription("MengLuo 菜单"); ball.setElevation(dp(6));
         GradientDrawable background = new GradientDrawable(); background.setColor(ui.color(R.color.surface)); background.setShape(GradientDrawable.OVAL);
         background.setStroke(dp(1), ui.color(R.color.outline)); ball.setBackground(background);
+        // Set padding after the background; keep the whole square artwork inside the circle.
+        ball.setPadding(dp(9), dp(9), dp(9), dp(9)); ball.setClipToOutline(true);
         FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(dp(52), dp(52)); frame.addView(ball, params);
         frame.post(() -> { restoreBall(); if (!ballCollapsed) scheduleBallCollapse(2000); });
         frame.addOnLayoutChangeListener((view, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom) -> {
@@ -336,7 +344,8 @@ public final class MainActivity extends AppCompatActivity {
         content.addView(handle, handleSize); ui.gap(content, 16); content.addView(label("快捷菜单", 23, true));
         content.addView(ui.caption("MengLuo · 让创作更简单")); ui.gap(content, 14);
         content.addView(ui.button("回到 Harness", R.drawable.ic_arrow, true, () -> { sheet.dismiss(); showHarness(); }), new LinearLayout.LayoutParams(-1, -2));
-        content.addView(ui.button("工作目录", R.drawable.ic_workspace, false, () -> { sheet.dismiss(); workspaceDialog.show(); }), new LinearLayout.LayoutParams(-1, -2));
+        ui.gap(content, 10); content.addView(pageZoom.controls(ui));
+        content.addView(ui.button("手机文件访问", R.drawable.ic_workspace, false, () -> { sheet.dismiss(); workspaceDialog.show(); }), new LinearLayout.LayoutParams(-1, -2));
         String[] names = {"代码文件", "终端", "插件管理", "下载源", "更新管理", "权限说明", "运行环境", "运行日志"};
         int[] icons = {R.drawable.ic_workspace, R.drawable.ic_terminal, R.drawable.ic_plugins, R.drawable.ic_download, R.drawable.ic_download, R.drawable.ic_home, R.drawable.ic_home, R.drawable.ic_logs};
         Runnable[] actions = {projectBrowser::showProjects, this::terminal, this::plugins, this::downloads, updatesDialog::show, permissionHelp::showGuide, this::showHome, this::logs};
@@ -407,19 +416,22 @@ public final class MainActivity extends AppCompatActivity {
             });
         }); dialog.show();
     }
-    private void logs() {
-        TextView text = label(engine.logs(), 12, false); text.setTextIsSelectable(true); text.setTypeface(Typeface.MONOSPACE); text.setPadding(dp(14), 0, dp(14), 0);
+    private void logs() { logs(engine::logs); }
+    void logs(Supplier<String> snapshot) {
+        TextView text = label(snapshot.get(), 12, false); text.setTag("runtime-log-text"); text.setTextIsSelectable(true); text.setTypeface(Typeface.MONOSPACE); text.setPadding(dp(14), 0, dp(14), 0);
         LinearLayout content = ui.column(14);
         content.addView(ui.caption("界面显示近期日志。导出包含最多 3 MiB 历史记录及重启前日志；常见凭据已脱敏，分享前仍请检查。"));
         content.addView(text);
-        ScrollView scroll = new ScrollView(this); scroll.addView(content);
+        ScrollView scroll = new ScrollView(this); scroll.setTag("runtime-log-scroll"); scroll.addView(content);
+        // Run after text wrapping/layout, once only: reading older lines must not snap back down.
+        OneShotPreDrawListener.add(scroll, () -> scroll.scrollTo(0, content.getBottom()));
         new MaterialAlertDialogBuilder(this).setTitle("运行日志").setView(scroll)
-            .setPositiveButton("关闭", null).setNegativeButton("刷新", (dialog, which) -> logs())
+            .setPositiveButton("关闭", null).setNegativeButton("刷新", (dialog, which) -> logs(snapshot))
             .setNeutralButton("导出日志", (dialog, which) -> logExporter.start()).show();
     }
     private void terminal() {
         EditText command = new TextInputEditText(this); command.setHint("命令，例如 node -v"); command.setMinLines(3); command.setTypeface(Typeface.MONOSPACE);
-        new MaterialAlertDialogBuilder(this).setTitle("工作区终端").setMessage("工作目录：" + engine.workspaces.guestPath() + "\n运行 Bash、Node、Python 或 Git 命令。")
+        new MaterialAlertDialogBuilder(this).setTitle("工作区终端").setMessage("从 /workspace 启动，可用 cd 切换目录。手机内部存储：" + engine.workspaces.sharedRoot.getPath() + "\n项目路径由 Harness 自己管理。")
             .setView(ui.input(command)).setNegativeButton("取消", null).setPositiveButton("执行", (dialog, which) -> engine.command(command.getText().toString(), result -> { toast(result); logs(); })).show();
     }
     private void plugins() {
@@ -443,7 +455,11 @@ public final class MainActivity extends AppCompatActivity {
         state.putBoolean("ball-collapsed", ballCollapsed); projectBrowser.save(state); logExporter.save(state); workspaceDialog.save(state); super.onSaveInstanceState(state);
     }
     private ProjectBrowser createProjectBrowser(Bundle saved) {
-        return new ProjectBrowser(this, new ProjectFiles(engine.workspace, engine.rootfs, browserExternal, engine.workspaces::hasAccess), engine.profile, saved);
+        return new ProjectBrowser(this, projectFiles(), engine.profile, saved);
+    }
+    private ProjectFiles projectFiles() {
+        return new ProjectFiles(engine.workspace, engine.rootfs, engine.workspaces.storageRoot,
+            engine.workspaces.sharedRoot, engine.workspaces::hasAccess);
     }
     private void externalLink(Uri uri) {
         if (!"https".equals(uri.getScheme()) && !"http".equals(uri.getScheme())) { toast("不支持此链接类型"); return; }
@@ -452,7 +468,7 @@ public final class MainActivity extends AppCompatActivity {
     }
     private void toast(String text) { Toast.makeText(this, text, Toast.LENGTH_LONG).show(); }
     @Override public void onBackPressed() { if (web.getVisibility() == View.VISIBLE && web.canGoBack()) web.goBack(); else if (web.getVisibility() == View.VISIBLE) showHome(); else super.onBackPressed(); }
-    @Override protected void onResume() { super.onResume(); if (updates != null) updates.automaticCheck(); if (workspaceDialog != null) workspaceDialog.onResume(); }
+    @Override protected void onResume() { super.onResume(); if (updates != null) updates.automaticCheck(); if (workspaceDialog != null) { workspaceDialog.onResume(); refresh(); } }
     @Override public void onWindowFocusChanged(boolean focused) { super.onWindowFocusChanged(focused); if (focused && updates != null) updateObserver.run(); }
-    @Override protected void onDestroy() { updates.unlisten(updateObserver); updatesDialog.close(); ball.removeCallbacks(collapseBall); ball.animate().cancel(); engine.unlisten(observer); projectBrowser.close(); workspaceDialog.close(); logExporter.close(); permissionHelp.close(); if (compatibilityScript != null) compatibilityScript.remove(); web.destroy(); super.onDestroy(); }
+    @Override protected void onDestroy() { updates.unlisten(updateObserver); updatesDialog.close(); ball.removeCallbacks(collapseBall); ball.animate().cancel(); engine.unlisten(observer); projectBrowser.close(); workspaceDialog.close(); logExporter.close(); permissionHelp.close(); webFiles.close(); systemFiles.close(); if (compatibilityScript != null) compatibilityScript.remove(); web.destroy(); super.onDestroy(); }
 }

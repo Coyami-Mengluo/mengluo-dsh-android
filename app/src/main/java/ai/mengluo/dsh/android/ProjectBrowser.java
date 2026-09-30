@@ -24,6 +24,7 @@ final class ProjectBrowser {
     private final File profile, cache;
     private final ProjectFiles files;
     private final ProjectFolderExporter folders;
+    private final SystemFiles systemFiles;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final Set<AlertDialog> dialogs = new HashSet<>();
     private boolean closed;
@@ -36,6 +37,7 @@ final class ProjectBrowser {
     ProjectBrowser(Activity activity, ProjectFiles files, File profile, Bundle saved) {
         this.activity = activity; ui = new Ui(activity); this.profile = profile; cache = activity.getCacheDir();
         this.files = files;
+        systemFiles = new SystemFiles(activity, files);
         folders = new ProjectFolderExporter(activity, files, cache, saved);
         if (saved != null && saved.getString("files.project") != null) {
             pendingProject = new ProjectFiles.Project(saved.getString("files.title", "项目"), saved.getString("files.project"));
@@ -48,14 +50,14 @@ final class ProjectBrowser {
         state.putString("files.project", pendingProject.path); state.putString("files.title", pendingProject.title);
         state.putString("files.relative", pendingRelative); state.putInt("files.request", pendingRequest);
     }
-    void close() { closed = true; folders.close(); for (AlertDialog dialog : new ArrayList<>(dialogs)) dialog.dismiss(); worker.shutdown(); }
+    void close() { closed = true; folders.close(); systemFiles.close(); for (AlertDialog dialog : new ArrayList<>(dialogs)) dialog.dismiss(); worker.shutdown(); }
     private AlertDialog show(MaterialAlertDialogBuilder builder) { AlertDialog dialog = builder.create(); show(dialog); return dialog; }
     private void show(AlertDialog dialog) { dialogs.add(dialog); dialog.setOnDismissListener(ignored -> dialogs.remove(dialog)); dialog.show(); }
     private void toast(String value) { Toast.makeText(activity, value, Toast.LENGTH_LONG).show(); }
     void showProjects() {
         ProjectCatalog catalog = ProjectCatalog.read(profile);
-        if (files.external != null && catalog.projects.stream().noneMatch(p -> p.path.equals(files.external.getPath())))
-            catalog.projects.add(0, new ProjectFiles.Project("自定义工作目录", files.external.getPath()));
+        if (files.hasPhoneAccess() && catalog.projects.stream().noneMatch(p -> p.path.equals(files.primaryStorage.getPath())))
+            catalog.projects.add(0, new ProjectFiles.Project("手机内部存储", files.primaryStorage.getPath()));
         String[] labels = catalog.projects.stream().map(p -> p.title + "\n" + p.path).toArray(String[]::new);
         show(new MaterialAlertDialogBuilder(activity).setTitle("代码文件 · 选择项目")
             .setItems(labels, (dialog, index) -> browse(catalog.projects.get(index), "", 0))
@@ -121,8 +123,9 @@ final class ProjectBrowser {
     }
     private void fileActions(ProjectFiles.Project project, String relative) {
         show(new MaterialAlertDialogBuilder(activity).setTitle(relative.substring(relative.lastIndexOf('/') + 1))
-            .setItems(new String[]{"查看 / 编辑文本", "导出到手机…"}, (dialog, which) -> {
-                if (which == 0) edit(project, relative); else pick(project, relative, EXPORT);
+            .setItems(new String[]{"使用系统应用打开", "查看 / 编辑文本", "导出到手机…"}, (dialog, which) -> {
+                if (which == 0) systemFiles.open(project.path + (relative.isEmpty() ? "" : "/" + relative), false);
+                else if (which == 1) edit(project, relative); else pick(project, relative, EXPORT);
             }).setNegativeButton("返回目录", (dialog, which) -> browse(project, parent(relative), 0)));
     }
     private void edit(ProjectFiles.Project project, String relative) {

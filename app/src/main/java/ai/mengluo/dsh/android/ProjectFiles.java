@@ -10,12 +10,15 @@ import java.util.function.BooleanSupplier;
 final class ProjectFiles {
     static final long TEXT_LIMIT = 2L * 1024 * 1024, IMPORT_LIMIT = 32L * 1024 * 1024;
     private final File workspace, rootfs;
-    final File external;
+    private final File storageRoot;
+    final File primaryStorage;
     private final BooleanSupplier externalAccess;
-    ProjectFiles(File workspace, File rootfs) { this(workspace, rootfs, null, () -> false); }
-    ProjectFiles(File workspace, File rootfs, File external, BooleanSupplier externalAccess) {
-        this.workspace = workspace; this.rootfs = rootfs; this.external = external; this.externalAccess = externalAccess;
+    ProjectFiles(File workspace, File rootfs) { this(workspace, rootfs, null, null, () -> false); }
+    ProjectFiles(File workspace, File rootfs, File storageRoot, File primaryStorage, BooleanSupplier externalAccess) {
+        this.workspace = workspace; this.rootfs = rootfs; this.storageRoot = storageRoot;
+        this.primaryStorage = primaryStorage; this.externalAccess = externalAccess;
     }
+    boolean hasPhoneAccess() { return primaryStorage != null && storageRoot != null && externalAccess.getAsBoolean(); }
 
     static final class Project {
         final String title, path;
@@ -52,14 +55,14 @@ final class ProjectFiles {
         String path = root + (tail.isEmpty() ? "" : "/" + tail);
         // These are runtime internals or host/profile bind mounts, not code projects.
         if (runtimePath(path)) throw new IOException("此目录属于运行环境或配置，不能作为代码目录打开");
-        if (external != null && under(path, external.getPath())) {
-            if (!externalAccess.getAsBoolean()) throw new IOException("所有文件访问未授权，无法读写手机工作目录");
-            if (!external.isDirectory()) throw new IOException("手机工作目录已移动或不存在，请重新选择");
-            return withoutLinks(external, path.equals(external.getPath()) ? "" : path.substring(external.getPath().length() + 1));
+        if (under(path, "/storage") || under(path, "/sdcard")) {
+            if (!hasPhoneAccess()) throw new IOException("请先在手机文件访问中允许所有文件访问");
+            String prefix = under(path, "/sdcard") ? "/sdcard" : under(path, "/storage/self/primary") ? "/storage/self/primary" : "/storage";
+            File base = prefix.equals("/storage") ? storageRoot : primaryStorage;
+            if (!base.isDirectory()) throw new IOException("手机存储尚未就绪，请稍后重试");
+            return withoutLinks(base, path.equals(prefix) ? "" : path.substring(prefix.length() + 1));
         }
-        // Never mistake a disconnected public project for a similarly named private rootfs directory.
-        if (under(path, "/storage") || under(path, "/sdcard") || under(path, "/mnt"))
-            throw new IOException("此手机目录不是当前工作目录，请先在悬浮菜单的工作目录中选择它");
+        if (under(path, "/mnt")) throw new IOException("请使用 /storage 或 /sdcard 下的手机文件路径");
         File base = under(path, "/workspace") ? workspace : rootfs;
         String suffix = under(path, "/workspace") ? path.substring("/workspace".length()) : path;
         return withoutLinks(base, suffix.startsWith("/") ? suffix.substring(1) : suffix);
