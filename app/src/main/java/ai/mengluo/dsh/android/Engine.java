@@ -14,7 +14,7 @@ import java.util.concurrent.*;
 import java.util.function.Consumer;
 import java.util.regex.*;
 
-/** Owns the local processes and app-private workspace. ADB is never part of the runtime. */
+/** Owns local processes, the private runtime and the explicitly selected project directory. */
 final class Engine {
     private static Engine instance;
     static synchronized Engine get(Context context) {
@@ -23,6 +23,7 @@ final class Engine {
     }
     private final Context context;
     final File workspace, profile, rootfs;
+    final WorkspaceStore workspaces;
     private final File stateFile;
     final RuntimeStore versions;
     private final ExecutorService work = Executors.newSingleThreadExecutor();
@@ -39,6 +40,7 @@ final class Engine {
     private boolean eventPending;
     Engine(Context context) {
         this.context = context;
+        workspaces = new WorkspaceStore(context);
         downloadSource = DownloadSource.fromId(context.getSharedPreferences("downloads", 0).getString("source", "mirror"));
         File files = context.getFilesDir();
         log = new RuntimeLog(new File(files, "logs"));
@@ -52,6 +54,38 @@ final class Engine {
         if (installed()) status = "本地运行环境已安装，点击启动";
     }
     DownloadSource downloadSource() { return downloadSource; }
+    boolean running() { return backend != null; }
+    void changeWorkspace(File directory, boolean stopRunning, Consumer<String> result) {
+        final Process previous;
+        final long epoch;
+        synchronized (this) {
+            if (busy || checkingSource) { result.accept("请等待当前操作完成后切换工作目录"); return; }
+            if (backend != null && !stopRunning) { result.accept("请先停止 Harness，再切换工作目录"); return; }
+            previous = backend; epoch = generation; busy = true;
+        }
+        event("正在检查工作目录");
+        work.execute(() -> {
+            String failure = null;
+            try {
+                // Validate before interrupting a running session. Never move or migrate project data.
+                File checked = directory == null ? null : workspaces.validate(directory, false);
+                if (checked != null) WorkspacePaths.probeWrite(checked);
+                cancelled(epoch);
+                if (previous != null) {
+                    synchronized (this) { cancelled(epoch); backend = null; readyUrl = null; }
+                    if (!RuntimeProcesses.stopAndWait(previous, 5)) {
+                        synchronized (this) { if (generation == epoch) backend = previous; }
+                        throw new IOException("Harness 尚未退出，未切换工作目录，请停止后重试");
+                    }
+                }
+                synchronized (this) { cancelled(epoch); workspaces.select(checked); }
+                event("工作目录已切换；原项目与运行环境保留");
+            } catch (Exception error) { failure = error.getMessage(); note("切换工作目录失败：" + error); if (epoch == generation) event("切换失败：" + failure); }
+            finally { synchronized (this) { if (epoch == generation) { busy = false; event(status); } } }
+            String response = failure;
+            main.post(() -> result.accept(response));
+        });
+    }
     synchronized void downloadSource(DownloadSource source) throws IOException {
         if (busy || checkingSource) throw new IOException("请等待当前操作完成后切换下载源");
         if (!context.getSharedPreferences("downloads", 0).edit().putString("source", source.id).commit()) throw new IOException("下载源保存失败，请重试");
@@ -273,12 +307,21 @@ final class Engine {
         return spawn(command, null, workspace, profile);
     }
     private Process spawn(List<String> command, File isolatedHome, File working, File data) throws IOException {
+        return spawn(command, isolatedHome, working, data, null);
+    }
+    Process spawn(List<String> command, File isolatedHome, File working, File data, File external) throws IOException {
         String libs = context.getApplicationInfo().nativeLibraryDir;
         RuntimePolicy.requireElf64(new File(libs, "libproot.so"), BuildConfig.RUNTIME_ABI);
         ArrayList<String> args = new ArrayList<>(List.of(libs + "/libproot.so", "--kill-on-exit", "-0", "-r", rootfs.getPath(),
             "-b", "/dev", "-b", "/proc", "-b", "/sys", "-b", working.getPath() + ":/workspace"));
         if (isolatedHome != null) { new File(isolatedHome, ".dsh").mkdirs(); args.addAll(List.of("-b", isolatedHome.getPath() + ":/root")); }
-        args.addAll(List.of("-b", data.getPath() + ":/root/.dsh", "-w", "/workspace", "/usr/bin/env", "-i",
+        // Keep /workspace stable for old sessions. The public directory has the same real path in Linux.
+        String cwd = "/workspace";
+        if (external != null) {
+            File checked = workspaces.validate(external, false);
+            cwd = checked.getPath(); args.addAll(List.of("-b", cwd + ":" + cwd));
+        }
+        args.addAll(List.of("-b", data.getPath() + ":/root/.dsh", "-w", cwd, "/usr/bin/env", "-i",
             "HOME=/root", "USER=root", "LANG=C.UTF-8", "TERM=xterm-256color", "TMPDIR=/tmp", "DEBIAN_FRONTEND=noninteractive",
             "PATH=" + RuntimePolicy.GUEST_PATH, "DSH_HOME=/root/.dsh", "DSH_TELEMETRY_DISABLED=1"));
         args.addAll(downloadSource.packageEnvironment());
@@ -299,8 +342,11 @@ final class Engine {
         } catch (IOException error) { note("输出流已结束：" + error.getMessage()); }
     }
     private void run(List<String> command, int seconds, long epoch) throws Exception {
+        run(command, seconds, epoch, null);
+    }
+    private void run(List<String> command, int seconds, long epoch, File external) throws Exception {
         cancelled(epoch);
-        Process process = spawn(command);
+        Process process = spawn(command, null, workspace, profile, external);
         synchronized (this) { if (epoch != generation) { RuntimeProcesses.stopAndWait(process, 3); cancelled(epoch); } operation = process; }
         CommandFailure.Output captured = new CommandFailure.Output();
         Future<?> output = readers.submit(() -> consume(process, captured::add));
@@ -325,7 +371,7 @@ final class Engine {
                 try (ServerSocket socket = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) { port = socket.getLocalPort(); }
                 RuntimeStore.Slot active = versions.active(); if (active == null) throw new IOException("当前 Harness 安装不完整");
                 Process process = spawn(List.of("/opt/node/bin/node", "--expose-internals", active.cli(),
-                    "web", "--host", "127.0.0.1", "--port", Integer.toString(port), "--no-open"));
+                    "web", "--host", "127.0.0.1", "--port", Integer.toString(port), "--no-open"), null, workspace, profile, workspaces.active());
                 synchronized (this) { if (epoch != generation) { RuntimeProcesses.stopAndWait(process, 3); cancelled(epoch); } backend = process; }
                 readers.execute(() -> consume(process, value -> {
                     String url = readyAddress(value);
@@ -365,7 +411,7 @@ final class Engine {
         event("正在执行工作区命令");
         work.execute(() -> {
             String message;
-            try { prepareDirectories(); run(List.of("/bin/bash", "-lc", text), 600, epoch); message = "执行完成，请查看日志"; }
+            try { File external = workspaces.active(); prepareDirectories(); run(List.of("/bin/bash", "-lc", text), 600, epoch, external); message = "执行完成，请查看日志"; }
             catch (Exception error) { note("命令失败：" + error); message = error.getMessage(); }
             finally { synchronized (this) { if (epoch == generation) { busy = false; event(readyUrl == null ? "运行环境已就绪" : "Harness 已在本机运行"); } } }
             String response = message; main.post(() -> result.accept(response));

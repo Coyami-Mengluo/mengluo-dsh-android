@@ -59,6 +59,9 @@ public final class MainActivity extends AppCompatActivity {
     private String loadedUrl;
     private ScriptHandler compatibilityScript;
     private ProjectBrowser projectBrowser;
+    private WorkspaceDialog workspaceDialog;
+    private TextView workspacePath;
+    private File browserExternal;
     private LogExporter logExporter;
     private PermissionHelp permissionHelp;
     private boolean ballCollapsed, ballTouching, ballMenuOpen;
@@ -82,7 +85,9 @@ public final class MainActivity extends AppCompatActivity {
         ballCollapsed = saved != null && saved.getBoolean("ball-collapsed", false);
         ui = new Ui(this);
         permissionHelp = new PermissionHelp(this, ui);
-        projectBrowser = new ProjectBrowser(this, engine.workspace, engine.rootfs, engine.profile, saved);
+        browserExternal = engine.workspaces.selected();
+        projectBrowser = createProjectBrowser(saved);
+        workspaceDialog = new WorkspaceDialog(this, engine, saved, () -> { refresh(); showHome(); });
         logExporter = new LogExporter(this, engine, saved);
         frame = new FrameLayout(this); frame.setBackgroundColor(ui.color(R.color.page));
         frame.setTag("shell-frame");
@@ -186,9 +191,13 @@ public final class MainActivity extends AppCompatActivity {
         download.addView(ui.caption("为基础环境、安装依赖、Harness 和 npm 插件选择下载线路。")); ui.gap(download, 6);
         sourceButton = ui.button(engine.downloadSource().title, R.drawable.ic_download, false, this::downloads);
         download.addView(sourceButton, new LinearLayout.LayoutParams(-1, -2)); panels.addView(download);
+        LinearLayout directory = ui.card(); directory.addView(label("工作目录", 17, true));
+        workspacePath = ui.caption(engine.workspaces.guestPath()); workspacePath.setTextIsSelectable(true); directory.addView(workspacePath);
+        directory.addView(ui.button("选择工作目录", R.drawable.ic_workspace, false, workspaceDialog::show), new LinearLayout.LayoutParams(-1, -2));
+        panels.addView(directory);
         updatesButton = ui.button("更新管理", R.drawable.ic_download, false, updatesDialog::show);
         panels.addView(updatesButton, new LinearLayout.LayoutParams(-1, -2));
-        intro.addView(ui.pair(ui.button("代码文件", R.drawable.ic_workspace, false, projectBrowser::showProjects), ui.button("终端", R.drawable.ic_terminal, false, this::terminal)));
+        intro.addView(ui.pair(ui.button("代码文件", R.drawable.ic_workspace, false, () -> projectBrowser.showProjects()), ui.button("终端", R.drawable.ic_terminal, false, this::terminal)));
         ui.gap(intro, 8); MaterialButton logs = ui.button("查看运行日志", R.drawable.ic_logs, false, this::logs);
         logs.setBackgroundTintList(android.content.res.ColorStateList.valueOf(Color.TRANSPARENT)); intro.addView(logs, new LinearLayout.LayoutParams(-1, -2));
         MaterialButton permissions = ui.button("运行权限说明", 0, false, permissionHelp::showGuide);
@@ -209,6 +218,11 @@ public final class MainActivity extends AppCompatActivity {
     }
     private void refresh() {
         if (isDestroyed()) return;
+        File selected = engine.workspaces.selected();
+        if (!Objects.equals(browserExternal, selected)) {
+            projectBrowser.close(); browserExternal = selected; projectBrowser = createProjectBrowser(null);
+        }
+        workspacePath.setText(engine.workspaces.guestPath() + (selected == null ? " · 应用内" : " · 手机公共目录"));
         state.setText(engine.status); progress.setVisibility(engine.busy ? View.VISIBLE : View.GONE);
         sourceButton.setText(engine.downloadSource().title);
         sourceButton.setEnabled(!engine.busy && !engine.checkingSource);
@@ -322,6 +336,7 @@ public final class MainActivity extends AppCompatActivity {
         content.addView(handle, handleSize); ui.gap(content, 16); content.addView(label("快捷菜单", 23, true));
         content.addView(ui.caption("MengLuo · 让创作更简单")); ui.gap(content, 14);
         content.addView(ui.button("回到 Harness", R.drawable.ic_arrow, true, () -> { sheet.dismiss(); showHarness(); }), new LinearLayout.LayoutParams(-1, -2));
+        content.addView(ui.button("工作目录", R.drawable.ic_workspace, false, () -> { sheet.dismiss(); workspaceDialog.show(); }), new LinearLayout.LayoutParams(-1, -2));
         String[] names = {"代码文件", "终端", "插件管理", "下载源", "更新管理", "权限说明", "运行环境", "运行日志"};
         int[] icons = {R.drawable.ic_workspace, R.drawable.ic_terminal, R.drawable.ic_plugins, R.drawable.ic_download, R.drawable.ic_download, R.drawable.ic_home, R.drawable.ic_home, R.drawable.ic_logs};
         Runnable[] actions = {projectBrowser::showProjects, this::terminal, this::plugins, this::downloads, updatesDialog::show, permissionHelp::showGuide, this::showHome, this::logs};
@@ -404,7 +419,7 @@ public final class MainActivity extends AppCompatActivity {
     }
     private void terminal() {
         EditText command = new TextInputEditText(this); command.setHint("命令，例如 node -v"); command.setMinLines(3); command.setTypeface(Typeface.MONOSPACE);
-        new MaterialAlertDialogBuilder(this).setTitle("工作区终端").setMessage("在 /workspace 中运行 Bash、Node 或 Git 命令。")
+        new MaterialAlertDialogBuilder(this).setTitle("工作区终端").setMessage("工作目录：" + engine.workspaces.guestPath() + "\n运行 Bash、Node、Python 或 Git 命令。")
             .setView(ui.input(command)).setNegativeButton("取消", null).setPositiveButton("执行", (dialog, which) -> engine.command(command.getText().toString(), result -> { toast(result); logs(); })).show();
     }
     private void plugins() {
@@ -425,7 +440,10 @@ public final class MainActivity extends AppCompatActivity {
         if (!logExporter.result(request, result, data)) projectBrowser.onActivityResult(request, result, data);
     }
     @Override protected void onSaveInstanceState(Bundle state) {
-        state.putBoolean("ball-collapsed", ballCollapsed); projectBrowser.save(state); logExporter.save(state); super.onSaveInstanceState(state);
+        state.putBoolean("ball-collapsed", ballCollapsed); projectBrowser.save(state); logExporter.save(state); workspaceDialog.save(state); super.onSaveInstanceState(state);
+    }
+    private ProjectBrowser createProjectBrowser(Bundle saved) {
+        return new ProjectBrowser(this, new ProjectFiles(engine.workspace, engine.rootfs, browserExternal, engine.workspaces::hasAccess), engine.profile, saved);
     }
     private void externalLink(Uri uri) {
         if (!"https".equals(uri.getScheme()) && !"http".equals(uri.getScheme())) { toast("不支持此链接类型"); return; }
@@ -434,7 +452,7 @@ public final class MainActivity extends AppCompatActivity {
     }
     private void toast(String text) { Toast.makeText(this, text, Toast.LENGTH_LONG).show(); }
     @Override public void onBackPressed() { if (web.getVisibility() == View.VISIBLE && web.canGoBack()) web.goBack(); else if (web.getVisibility() == View.VISIBLE) showHome(); else super.onBackPressed(); }
-    @Override protected void onResume() { super.onResume(); if (updates != null) updates.automaticCheck(); }
+    @Override protected void onResume() { super.onResume(); if (updates != null) updates.automaticCheck(); if (workspaceDialog != null) workspaceDialog.onResume(); }
     @Override public void onWindowFocusChanged(boolean focused) { super.onWindowFocusChanged(focused); if (focused && updates != null) updateObserver.run(); }
-    @Override protected void onDestroy() { updates.unlisten(updateObserver); updatesDialog.close(); ball.removeCallbacks(collapseBall); ball.animate().cancel(); engine.unlisten(observer); projectBrowser.close(); logExporter.close(); permissionHelp.close(); if (compatibilityScript != null) compatibilityScript.remove(); web.destroy(); super.onDestroy(); }
+    @Override protected void onDestroy() { updates.unlisten(updateObserver); updatesDialog.close(); ball.removeCallbacks(collapseBall); ball.animate().cancel(); engine.unlisten(observer); projectBrowser.close(); workspaceDialog.close(); logExporter.close(); permissionHelp.close(); if (compatibilityScript != null) compatibilityScript.remove(); web.destroy(); super.onDestroy(); }
 }

@@ -31,8 +31,11 @@ final class ProjectBrowser {
     private String pendingRelative;
     private int pendingRequest;
     ProjectBrowser(Activity activity, File workspace, File rootfs, File profile, Bundle saved) {
+        this(activity, new ProjectFiles(workspace, rootfs), profile, saved);
+    }
+    ProjectBrowser(Activity activity, ProjectFiles files, File profile, Bundle saved) {
         this.activity = activity; ui = new Ui(activity); this.profile = profile; cache = activity.getCacheDir();
-        files = new ProjectFiles(workspace, rootfs);
+        this.files = files;
         folders = new ProjectFolderExporter(activity, files, cache, saved);
         if (saved != null && saved.getString("files.project") != null) {
             pendingProject = new ProjectFiles.Project(saved.getString("files.title", "项目"), saved.getString("files.project"));
@@ -51,6 +54,8 @@ final class ProjectBrowser {
     private void toast(String value) { Toast.makeText(activity, value, Toast.LENGTH_LONG).show(); }
     void showProjects() {
         ProjectCatalog catalog = ProjectCatalog.read(profile);
+        if (files.external != null && catalog.projects.stream().noneMatch(p -> p.path.equals(files.external.getPath())))
+            catalog.projects.add(0, new ProjectFiles.Project("自定义工作目录", files.external.getPath()));
         String[] labels = catalog.projects.stream().map(p -> p.title + "\n" + p.path).toArray(String[]::new);
         show(new MaterialAlertDialogBuilder(activity).setTitle("代码文件 · 选择项目")
             .setItems(labels, (dialog, index) -> browse(catalog.projects.get(index), "", 0))

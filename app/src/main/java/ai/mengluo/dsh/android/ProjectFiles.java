@@ -4,12 +4,18 @@ import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
+import java.util.function.BooleanSupplier;
 
 /** Translates guest project paths without following Linux symlinks on the Android host. */
 final class ProjectFiles {
     static final long TEXT_LIMIT = 2L * 1024 * 1024, IMPORT_LIMIT = 32L * 1024 * 1024;
     private final File workspace, rootfs;
-    ProjectFiles(File workspace, File rootfs) { this.workspace = workspace; this.rootfs = rootfs; }
+    final File external;
+    private final BooleanSupplier externalAccess;
+    ProjectFiles(File workspace, File rootfs) { this(workspace, rootfs, null, () -> false); }
+    ProjectFiles(File workspace, File rootfs, File external, BooleanSupplier externalAccess) {
+        this.workspace = workspace; this.rootfs = rootfs; this.external = external; this.externalAccess = externalAccess;
+    }
 
     static final class Project {
         final String title, path;
@@ -46,6 +52,14 @@ final class ProjectFiles {
         String path = root + (tail.isEmpty() ? "" : "/" + tail);
         // These are runtime internals or host/profile bind mounts, not code projects.
         if (runtimePath(path)) throw new IOException("此目录属于运行环境或配置，不能作为代码目录打开");
+        if (external != null && under(path, external.getPath())) {
+            if (!externalAccess.getAsBoolean()) throw new IOException("所有文件访问未授权，无法读写手机工作目录");
+            if (!external.isDirectory()) throw new IOException("手机工作目录已移动或不存在，请重新选择");
+            return withoutLinks(external, path.equals(external.getPath()) ? "" : path.substring(external.getPath().length() + 1));
+        }
+        // Never mistake a disconnected public project for a similarly named private rootfs directory.
+        if (under(path, "/storage") || under(path, "/sdcard") || under(path, "/mnt"))
+            throw new IOException("此手机目录不是当前工作目录，请先在悬浮菜单的工作目录中选择它");
         File base = under(path, "/workspace") ? workspace : rootfs;
         String suffix = under(path, "/workspace") ? path.substring("/workspace".length()) : path;
         return withoutLinks(base, suffix.startsWith("/") ? suffix.substring(1) : suffix);
@@ -116,7 +130,8 @@ final class ProjectFiles {
         String relative = child(directory, name);
         File target = resolve(project, relative);
         if (target.exists()) throw new IOException("同名文件已存在，未覆盖");
-        File staging = File.createTempFile("project-import-", ".partial", cache);
+        // Stage on the destination filesystem, so public storage doesn't need a cross-device rename.
+        File staging = File.createTempFile(".mengluo-import-", ".partial", target.getParentFile());
         try {
             try (OutputStream output = new FileOutputStream(staging)) {
                 byte[] buffer = new byte[65536]; int length; long total = 0;

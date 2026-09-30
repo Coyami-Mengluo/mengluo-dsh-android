@@ -26,7 +26,7 @@ final class PermissionHelp {
     static final String INTRO_SEEN = "install-hint-dismissed";
     static final String RUNTIME_SEEN = "runtime-hint-shown";
     private static final String SUMMARY = "安卓执行代码时，若提示 Bash 沙箱不可用，可对可信任务使用「完全访问（Full access）」。";
-    private static final String RISK = "完全访问会放开工作区限制，命令可能读写本 App 的其他项目、配置和 API 密钥。仅运行可信代码。";
+    private static final String RISK = "完全访问会放开工作区限制，命令可能读写本 App 的其他项目、配置和 API 密钥。若已授予所有文件访问，还可能读写其他公共文件。仅运行可信代码。";
     private final AppCompatActivity activity;
     private final Ui ui;
     private final SharedPreferences preferences;

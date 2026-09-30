@@ -22,7 +22,7 @@ public class ProjectFilesTest {
         assertEquals(new File(workspace, "other/main.js"), files.resolve(new ProjectFiles.Project("other", "/workspace/other"), "main.js"));
     }
     @Test public void rejectsTraversalAndSpecialBindMounts() {
-        for (String path : new String[]{"/", "/proc", "/dev", "/sys", "/root/.dsh", "/root/.dsh/storages", "/opt/harness", "/.l2s", "/.l2s/backing-file", "/workspace/../root"})
+        for (String path : new String[]{"/", "/proc", "/dev", "/sys", "/root/.dsh", "/root/.dsh/storages", "/opt/harness", "/.l2s", "/.l2s/backing-file", "/workspace/../root", "/storage/emulated/0/old-project", "/sdcard/old-project", "/mnt/old-project"})
             assertThrows(IOException.class, () -> files.resolve(new ProjectFiles.Project("bad", path), ""));
         for (String path : new String[]{"../other", "/root", "a/../../outside", "..\\outside", "bad\0name"})
             assertThrows(IOException.class, () -> files.resolve(selected, path));
