@@ -1,9 +1,7 @@
 package ai.mengluo.dsh.android;
 
-import android.Manifest;
 import android.app.*;
 import android.content.*;
-import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.Rect;
@@ -46,6 +44,8 @@ public final class MainActivity extends AppCompatActivity {
     private PageZoom pageZoom;
     private SystemFiles systemFiles;
     private WebFiles webFiles;
+    private WebTaskEvents webTaskEvents;
+    private TaskNotificationSettings taskNotificationSettings;
     private ImageButton ball;
     private TextView state, statusChip, runtimeVersion;
     private Button updatesButton;
@@ -88,6 +88,7 @@ public final class MainActivity extends AppCompatActivity {
         updates = AndroidUpdates.get(this); updatesDialog = new UpdatesDialog(this);
         ballCollapsed = saved != null && saved.getBoolean("ball-collapsed", false);
         ui = new Ui(this);
+        taskNotificationSettings = new TaskNotificationSettings(this);
         permissionHelp = new PermissionHelp(this, ui);
         projectBrowser = createProjectBrowser(saved);
         workspaceDialog = new WorkspaceDialog(this, engine, saved, this::refresh);
@@ -113,6 +114,7 @@ public final class MainActivity extends AppCompatActivity {
         pageZoom = new PageZoom(this, web, () -> engine.readyUrl);
         systemFiles = new SystemFiles(this, projectFiles());
         webFiles = new WebFiles(web, () -> engine.readyUrl, systemFiles, () -> projectBrowser.showProjects());
+        webTaskEvents = new WebTaskEvents(web, () -> engine.readyUrl, TaskNotifications.get(this));
         web.getSettings().setJavaScriptEnabled(true); web.getSettings().setDomStorageEnabled(true);
         web.getSettings().setAllowFileAccess(false); web.getSettings().setAllowContentAccess(false);
         web.getSettings().setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
@@ -219,8 +221,7 @@ public final class MainActivity extends AppCompatActivity {
         return ui.button(text, 0, false, action);
     }
     private void service(String action) {
-        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
-            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 20);
+        TaskNotifications.get(this).requestOnce(this);
         startForegroundService(new Intent(this, EngineService.class).setAction(action));
     }
     private void refresh() {
@@ -241,6 +242,9 @@ public final class MainActivity extends AppCompatActivity {
             loadedUrl = engine.readyUrl;
             try { webFiles.install(loadedUrl); }
             catch (IOException error) { engine.note("系统文件打开适配未加载：" + error.getMessage()); }
+            try {
+                if (!webTaskEvents.install(loadedUrl)) engine.note("[notifications] 当前 WebView 不支持任务通知适配，请更新 Android System WebView。");
+            } catch (IOException error) { engine.note("任务通知适配加载失败：" + error.getMessage()); }
             if (compatibilityScript != null) { compatibilityScript.remove(); compatibilityScript = null; }
             if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
                 try (InputStream input = getAssets().open("web-compat.js")) {
@@ -250,6 +254,7 @@ public final class MainActivity extends AppCompatActivity {
                 } catch (Exception error) { engine.note("浏览器兼容处理失败：" + error.getMessage()); }
             } else engine.note("当前 WebView 不支持启动兼容脚本；若页面提示重连，请更新 Android System WebView");
             web.loadUrl(loadedUrl); showHarness();
+            if (hasWindowFocus()) TaskNotifications.get(this).requestOnce(this);
         }
     }
     private void showHarness() {
@@ -345,7 +350,8 @@ public final class MainActivity extends AppCompatActivity {
         content.addView(ui.caption("MengLuo · 让创作更简单")); ui.gap(content, 14);
         content.addView(ui.button("回到 Harness", R.drawable.ic_arrow, true, () -> { sheet.dismiss(); showHarness(); }), new LinearLayout.LayoutParams(-1, -2));
         ui.gap(content, 10); content.addView(pageZoom.controls(ui));
-        content.addView(ui.button("手机文件访问", R.drawable.ic_workspace, false, () -> { sheet.dismiss(); workspaceDialog.show(); }), new LinearLayout.LayoutParams(-1, -2));
+        content.addView(ui.pair(ui.button("手机文件访问", R.drawable.ic_workspace, false, () -> { sheet.dismiss(); workspaceDialog.show(); }),
+            ui.button("任务通知", R.drawable.ic_task_notification, false, () -> { sheet.dismiss(); taskNotificationSettings.show(); })));
         String[] names = {"代码文件", "终端", "插件管理", "下载源", "更新管理", "权限说明", "运行环境", "运行日志"};
         int[] icons = {R.drawable.ic_workspace, R.drawable.ic_terminal, R.drawable.ic_plugins, R.drawable.ic_download, R.drawable.ic_download, R.drawable.ic_home, R.drawable.ic_home, R.drawable.ic_logs};
         Runnable[] actions = {projectBrowser::showProjects, this::terminal, this::plugins, this::downloads, updatesDialog::show, permissionHelp::showGuide, this::showHome, this::logs};
@@ -418,9 +424,10 @@ public final class MainActivity extends AppCompatActivity {
     }
     private void logs() { logs(engine::logs); }
     void logs(Supplier<String> snapshot) {
-        TextView text = label(snapshot.get(), 12, false); text.setTag("runtime-log-text"); text.setTextIsSelectable(true); text.setTypeface(Typeface.MONOSPACE); text.setPadding(dp(14), 0, dp(14), 0);
+        TextView text = label("", 12, false); text.setText(LogHighlight.render(this, snapshot.get())); text.setTag("runtime-log-text"); text.setTextIsSelectable(true); text.setTypeface(Typeface.MONOSPACE); text.setPadding(dp(14), 0, dp(14), 0);
         LinearLayout content = ui.column(14);
         content.addView(ui.caption("界面显示近期日志。导出包含最多 3 MiB 历史记录及重启前日志；常见凭据已脱敏，分享前仍请检查。"));
+        content.addView(ui.caption("红色：错误 · 黄色：警告 · 绿色：成功 · 蓝色：状态"));
         content.addView(text);
         ScrollView scroll = new ScrollView(this); scroll.setTag("runtime-log-scroll"); scroll.addView(content);
         // Run after text wrapping/layout, once only: reading older lines must not snap back down.
@@ -467,8 +474,16 @@ public final class MainActivity extends AppCompatActivity {
             .setPositiveButton("打开", (dialog, which) -> { try { startActivity(new Intent(Intent.ACTION_VIEW, uri)); } catch (ActivityNotFoundException missing) { toast("未找到浏览器"); } }).show();
     }
     private void toast(String text) { Toast.makeText(this, text, Toast.LENGTH_LONG).show(); }
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent); setIntent(intent);
+        if (TaskNotifications.OPEN.equals(intent.getAction()) && engine.readyUrl != null) showHarness();
+    }
+    @Override public void onRequestPermissionsResult(int request, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(request, permissions, results);
+        if (request == TaskNotifications.PERMISSION_REQUEST && taskNotificationSettings != null) taskNotificationSettings.refresh();
+    }
     @Override public void onBackPressed() { if (web.getVisibility() == View.VISIBLE && web.canGoBack()) web.goBack(); else if (web.getVisibility() == View.VISIBLE) showHome(); else super.onBackPressed(); }
-    @Override protected void onResume() { super.onResume(); if (updates != null) updates.automaticCheck(); if (workspaceDialog != null) { workspaceDialog.onResume(); refresh(); } }
+    @Override protected void onResume() { super.onResume(); if (updates != null) updates.automaticCheck(); if (workspaceDialog != null) { workspaceDialog.onResume(); refresh(); } if (taskNotificationSettings != null) taskNotificationSettings.refresh(); if (engine != null && engine.readyUrl != null) TaskNotifications.get(this).requestOnce(this); }
     @Override public void onWindowFocusChanged(boolean focused) { super.onWindowFocusChanged(focused); if (focused && updates != null) updateObserver.run(); }
-    @Override protected void onDestroy() { updates.unlisten(updateObserver); updatesDialog.close(); ball.removeCallbacks(collapseBall); ball.animate().cancel(); engine.unlisten(observer); projectBrowser.close(); workspaceDialog.close(); logExporter.close(); permissionHelp.close(); webFiles.close(); systemFiles.close(); if (compatibilityScript != null) compatibilityScript.remove(); web.destroy(); super.onDestroy(); }
+    @Override protected void onDestroy() { updates.unlisten(updateObserver); updatesDialog.close(); ball.removeCallbacks(collapseBall); ball.animate().cancel(); engine.unlisten(observer); projectBrowser.close(); workspaceDialog.close(); logExporter.close(); permissionHelp.close(); webFiles.close(); webTaskEvents.close(); taskNotificationSettings.close(); systemFiles.close(); if (compatibilityScript != null) compatibilityScript.remove(); web.destroy(); super.onDestroy(); }
 }

@@ -5,6 +5,9 @@ import android.view.inspector.WindowInspector;
 import android.widget.Button;
 import android.widget.ScrollView;
 import android.widget.TextView;
+import android.content.res.Configuration;
+import android.text.Spanned;
+import android.text.style.ForegroundColorSpan;
 import androidx.test.core.app.ActivityScenario;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
@@ -15,6 +18,25 @@ import static org.junit.Assert.*;
 
 @RunWith(AndroidJUnit4.class)
 public class LogViewTest {
+    @Test public void highlightsBothThemesWithoutChangingCopyableText() {
+        var context = InstrumentationRegistry.getInstrumentation().getTargetContext();
+        String source = "[2026-10-02T12:00:00Z] 安装失败：退出码 100\n[WARN] deprecated\n安装完成\n[web] 浏览器接口检查\nnode=v24.19.0";
+        for (int theme : new int[]{Configuration.UI_MODE_NIGHT_NO, Configuration.UI_MODE_NIGHT_YES}) {
+            Configuration config = new Configuration(context.getResources().getConfiguration());
+            config.uiMode = (config.uiMode & ~Configuration.UI_MODE_NIGHT_MASK) | theme;
+            var themed = context.createConfigurationContext(config);
+            CharSequence result = LogHighlight.render(themed, source);
+            assertEquals(source, result.toString()); assertTrue(result instanceof Spanned);
+            Spanned text = (Spanned) result;
+            String[] words = {"安装失败", "[WARN]", "安装完成", "[web]", "node="};
+            int[] colors = {R.color.danger, R.color.warning, R.color.success, R.color.accent, R.color.ink};
+            for (int i = 0; i < words.length; i++) {
+                int start = source.indexOf(words[i]);
+                ForegroundColorSpan[] spans = text.getSpans(start, start + words[i].length(), ForegroundColorSpan.class);
+                assertEquals(1, spans.length); assertEquals(themed.getColor(colors[i]), spans[0].getForegroundColor());
+            }
+        }
+    }
     @Test public void opensAtLatestLineAndDoesNotPullReaderBackDown() {
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
             scenario.onActivity(activity -> activity.logs(() -> history("latest-on-open")));

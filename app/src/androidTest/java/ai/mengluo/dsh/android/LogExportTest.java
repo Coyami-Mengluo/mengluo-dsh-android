@@ -12,6 +12,9 @@ import org.junit.Test;
 import org.junit.runner.RunWith;
 import java.io.*;
 import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.charset.StandardCharsets;
+import java.util.Comparator;
 import java.util.UUID;
 import static org.junit.Assert.*;
 
@@ -42,15 +45,21 @@ public class LogExportTest {
         var monitor = instrumentation.addMonitor(picker,
             new Instrumentation.ActivityResult(Activity.RESULT_OK, new Intent().setData(uri)), true);
         String marker = "export-marker-" + UUID.randomUUID();
-        try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
-            Engine engine = Engine.get(context); engine.note(marker);
-            for (int i = 0; i < 900; i++) engine.note("export-fixture " + i + "x".repeat(80));
-            engine.note("?token=export-secret-token API_KEY=export-secret-key");
-            assertFalse(engine.logs().contains(marker));
+        File fixture = Files.createTempDirectory(context.getCacheDir().toPath(), "log-export-fixture-").toFile();
+        try (RuntimeLog log = new RuntimeLog(fixture);
+             ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
+            log.append(marker);
+            for (int i = 0; i < 900; i++) log.append(marker + " export-fixture " + i + "x".repeat(80));
+            log.append("?token=export-secret-token API_KEY=export-secret-key");
+            assertFalse(log.tail().contains(marker + "\n"));
             scenario.onActivity(activity -> {
                 try {
+                    // Replace only this Activity's export source, never the Engine singleton or its history.
+                    var field = MainActivity.class.getDeclaredField("logExporter"); field.setAccessible(true);
+                    ((LogExporter) field.get(activity)).close();
+                    field.set(activity, new LogExporter(activity, () -> log.snapshot("isolated export test"), null));
                     // Exercise the real dialog button and MainActivity result callback, not just the writer.
-                    var method = MainActivity.class.getDeclaredMethod("logs"); method.setAccessible(true); method.invoke(activity);
+                    activity.logs(log::tail);
                     for (android.view.View window : android.view.inspector.WindowInspector.getGlobalWindowViews()) {
                         android.widget.Button button = window.findViewById(android.R.id.button3);
                         if (button != null && "导出日志".contentEquals(button.getText())) { button.performClick(); return; }
@@ -66,6 +75,13 @@ public class LogExportTest {
             }
             assertEquals(1, monitor.getHits()); assertTrue(exported.contains(marker)); assertTrue(exported.contains("export-fixture 899"));
             assertFalse(exported.contains("export-secret-token")); assertFalse(exported.contains("export-secret-key"));
-        } finally { instrumentation.removeMonitor(monitor); Files.deleteIfExists(destination.toPath()); }
+            assertFalse("Test content must not enter real runtime history",
+                new String(Engine.get(context).exportLogs(), StandardCharsets.UTF_8).contains(marker));
+        } finally {
+            instrumentation.removeMonitor(monitor); Files.deleteIfExists(destination.toPath());
+            try (var paths = Files.walk(fixture.toPath())) {
+                for (Path path : paths.sorted(Comparator.reverseOrder()).toArray(Path[]::new)) Files.deleteIfExists(path);
+            }
+        }
     }
 }

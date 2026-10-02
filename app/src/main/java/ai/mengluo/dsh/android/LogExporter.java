@@ -14,11 +14,15 @@ import java.util.concurrent.*;
 final class LogExporter {
     static final int EXPORT = 32;
     private final Activity activity;
-    private final Engine engine;
+    @FunctionalInterface interface Snapshot { byte[] read() throws IOException; }
+    private final Snapshot source;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private boolean pending, closed;
     LogExporter(Activity activity, Engine engine, Bundle saved) {
-        this.activity = activity; this.engine = engine;
+        this(activity, engine::exportLogs, saved);
+    }
+    LogExporter(Activity activity, Snapshot source, Bundle saved) {
+        this.activity = activity; this.source = source;
         pending = saved != null && saved.getBoolean("logs.export-pending", false);
     }
     static Intent intent() {
@@ -43,7 +47,7 @@ final class LogExporter {
         worker.execute(() -> {
             String message;
             try {
-                byte[] snapshot = engine.exportLogs();
+                byte[] snapshot = source.read();
                 try (OutputStream out = resolver.openOutputStream(uri, "wt")) {
                     if (out == null) throw new IOException("无法打开保存位置");
                     out.write(snapshot);

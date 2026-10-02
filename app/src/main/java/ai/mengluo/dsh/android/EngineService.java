@@ -4,14 +4,17 @@ import android.app.*;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.os.*;
+import java.util.function.Consumer;
 
 /** User-started foreground runtime, never silently restarted after a device reboot. */
 public final class EngineService extends Service {
     static final String CHANNEL = "local-runtime";
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private final Consumer<Engine> notificationRuntime = engine -> TaskNotifications.get(this).runtime(engine.readyUrl);
     @Override public void onCreate() {
         super.onCreate();
         getSystemService(NotificationManager.class).createNotificationChannel(new NotificationChannel(CHANNEL, "本地 Harness", NotificationManager.IMPORTANCE_LOW));
+        Engine.get(this).listen(notificationRuntime);
     }
     @Override public int onStartCommand(Intent intent, int flags, int id) {
         Engine engine = Engine.get(this);
@@ -33,5 +36,5 @@ public final class EngineService extends Service {
         return START_NOT_STICKY;
     }
     @Override public IBinder onBind(Intent intent) { return null; }
-    @Override public void onDestroy() { Engine.get(this).stop(); handler.removeCallbacksAndMessages(null); super.onDestroy(); }
+    @Override public void onDestroy() { Engine.get(this).unlisten(notificationRuntime); TaskNotifications.get(this).runtime(null); Engine.get(this).stop(); handler.removeCallbacksAndMessages(null); super.onDestroy(); }
 }

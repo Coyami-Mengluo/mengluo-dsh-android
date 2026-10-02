@@ -8,6 +8,7 @@
     <color name="tonal">#2A3452</color>
     <color name="outline">#333D54</color>
     <color name="success">#98DDB8</color>
+    <color name="warning">#F2C66D</color>
     <color name="success_surface">#193C30</color>
     <color name="danger">#FFADB3</color>
     <color name="danger_surface">#44272F</color>

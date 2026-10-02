@@ -76,6 +76,14 @@ node scripts/verify-apk.mjs arm64-v8a
 
 MuMu 自带的旧 WebView 缺少 `Promise.withResolvers` 和 `AbortSignal.any`。App 仅在当前 Harness 本地 origin 的文档启动阶段补齐这两个缺失接口，已有原生接口不覆盖，不修改官方文件或增加原生权限桥接；兼容脚本测试：`node --test scripts/web-compat.test.mjs`。它不替代浏览器安全更新，也不代表兼容任意老旧 WebView。
 
+## 任务通知与日志高亮
+
+悬浮菜单新增“任务通知”，可开关提醒、打开系统通知设置和发送测试通知。任务结束或需要确认 / 回答问题时显示系统提醒，点击回到 Harness；仅显示固定提示，不显示聊天正文、命令或密钥，也不提供自动确认按钮。Android 13 及以上需允许通知权限，拒绝后不会反复申请。运行日志增加深浅色高亮，不改写存储、复制或导出的日志原文。
+
+适配旁听官方页面已建立的事件连接，不另建客户端、不回应确认请求、不改动官方文件。支持已核对的旧版 `events.host/events.mux` 和新版 `remote.mux` 事件格式；未知格式忽略，不依据聊天文本猜测任务完成。任务结束指已观察到运行转为空闲，不代表生成内容或所有命令验证成功。断线恢复不补发无法确认的历史完成提醒。通知依赖 App 中 Harness 页面连接保持运行；强行停止、页面连接关闭、系统回收或省电限制时不能保证送达，勿扰模式和通知渠道设置可能静音。
+
+适配测试：`node --test scripts/task-events.test.mjs`；本地状态测试：`TaskNoticeStateTest`、`LogLevelTest`；设备回归：`TaskEventsViewTest`、`LogViewTest`。设备通知测试使用独立 loopback WebSocket 和隔离偏好，验证退到后台仍能收到提醒、不会发送确认答复，不调用模型或读取真实会话。
+
 ## 安全和限制
 
 PRoot 是用户态兼容工具，**不是可靠的安全隔离边界**；实际权限边界是 Android App UID。用户命令、Harness 和插件能访问本 App 的工作区和模型配置；只运行可信代码，不要运行不可信插件。API 配置不纳入 Android 自动备份。运行日志不应直接公开，插件仍可能输出私密内容。

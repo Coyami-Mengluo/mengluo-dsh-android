@@ -291,8 +291,7 @@ final class Engine {
         args.addAll(downloadSource.packageEnvironment());
         args.addAll(command);
         ProcessBuilder builder = new ProcessBuilder(args).directory(context.getFilesDir()).redirectErrorStream(true);
-        builder.environment().put("LD_LIBRARY_PATH", libs);
-        builder.environment().put("LD_PRELOAD", libs + "/libtalloc.so:" + libs + "/libandroid-shmem.so");
+        ProotLibraries.configure(builder, new File(libs), new File(context.getCodeCacheDir(), "proot-host-libs"));
         builder.environment().put("PROOT_LOADER", libs + "/libproot-loader.so");
         builder.environment().put("PROOT_TMP_DIR", context.getCacheDir().getPath());
         builder.environment().put("PROOT_NO_SECCOMP", "1");
@@ -327,6 +326,7 @@ final class Engine {
     void start() {
         synchronized (this) { if (busy || backend != null) return; if (!installed()) { event("请先安装本地运行环境"); return; } busy = true; }
         long epoch = generation;
+        note("[runtime] 正在启动 Harness " + currentVersion());
         event("正在启动本机 Harness");
         work.execute(() -> {
             try {
@@ -343,22 +343,43 @@ final class Engine {
                         readers.execute(() -> {
                             try {
                                 HarnessPage.check(url);
-                                if (epoch == generation && backend == process && process.isAlive()) { readyUrl = url; busy = false; event("Harness 已在本机运行"); }
+                                synchronized (Engine.this) {
+                                    if (epoch == generation && backend == process && process.isAlive() && readyUrl == null) {
+                                        readyUrl = url; busy = false;
+                                        note("[runtime] Harness 启动成功，页面检查通过");
+                                        event("Harness 已在本机运行");
+                                    }
+                                }
                             } catch (Exception error) { note("页面检查失败：" + error.getMessage()); }
                         });
                     }
                 }));
                 readers.execute(() -> {
-                    try { int code = process.waitFor(); if (backend == process) { backend = null; readyUrl = null; busy = false; event("Harness 已停止（" + code + "），工作区与安装版本保留"); } }
+                    try { backendExited(process, epoch, process.waitFor()); }
                     catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
                 });
-                main.postDelayed(() -> { if (backend == process && readyUrl == null) { stop(); event("启动超过 120 秒，请查看日志"); } }, 120_000);
+                main.postDelayed(() -> startupTimedOut(process, epoch), 120_000);
             } catch (Exception error) { note("启动失败：" + error); synchronized (this) { if (epoch == generation) { busy = false; event("启动失败：" + error.getMessage()); } } }
         });
+    }
+    synchronized void backendExited(Process process, long epoch, int code) {
+        boolean current = backend == process && generation == epoch;
+        note("[runtime] Harness 已退出，退出码 " + code + (current ? "（进程自行结束）" : "（已请求停止）"));
+        if (current) {
+            backend = null; readyUrl = null; busy = false;
+            event("Harness 已停止（" + code + "），工作区与安装版本保留");
+        }
+    }
+    synchronized void startupTimedOut(Process process, long epoch) {
+        if (backend != process || generation != epoch || readyUrl != null) return;
+        note("[runtime] Harness 启动超时：超过 120 秒仍未通过页面检查，正在停止本次进程");
+        stop();
+        event("启动超过 120 秒，请查看日志");
     }
     synchronized void stop() {
         generation++;
         Process job = operation, process = backend;
+        if (job != null || process != null || busy) note("[runtime] 已请求停止运行进程，工作区与安装版本保留");
         backend = null; readyUrl = null;
         // Blocking waits run off the UI thread. The serial work queue cannot launch another install before cleanup.
         work.execute(() -> {

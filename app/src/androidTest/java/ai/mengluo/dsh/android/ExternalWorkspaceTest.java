@@ -140,11 +140,17 @@ public class ExternalWorkspaceTest {
     private void checkPickerDefaults(String url) throws Exception {
         AtomicReference<WebView> browser = new AtomicReference<>();
         AtomicReference<androidx.webkit.ScriptHandler> injection = new AtomicReference<>();
+        AtomicReference<WebTaskEvents> taskEvents = new AtomicReference<>();
         CountDownLatch loaded = new CountDownLatch(1);
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
             scenario.onActivity(activity -> {
                 WebView view = new WebView(activity); browser.set(view); view.getSettings().setJavaScriptEnabled(true);
                 view.getSettings().setDomStorageEnabled(true);
+                TaskNotifications notices = new TaskNotifications(new ContextWrapper(context) {
+                    @Override public SharedPreferences getSharedPreferences(String name, int mode) { return preferences; }
+                });
+                WebTaskEvents events = new WebTaskEvents(view, () -> url, notices); taskEvents.set(events);
+                try { assertTrue(events.install(url)); } catch (IOException error) { throw new AssertionError(error); }
                 assertTrue(WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT));
                 try (InputStream input = context.getAssets().open("web-compat.js")) {
                     String script = new String(IO.bytes(input), StandardCharsets.UTF_8) + "\n"
@@ -160,6 +166,11 @@ public class ExternalWorkspaceTest {
             });
             try {
                 assertTrue("Isolated official page must load", loaded.await(30, TimeUnit.SECONDS));
+                AtomicBoolean connected = new AtomicBoolean(); long connectionDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(30);
+                while (!connected.get() && System.nanoTime() < connectionDeadline) {
+                    scenario.onActivity(activity -> connected.set(taskEvents.get().connected())); Thread.sleep(100);
+                }
+                assertTrue("The official Harness page event stream must reach the notification observer", connected.get());
                 for (String path : new String[]{null, "/root", "/workspace", "/"}) {
                     String payload = path == null ? "{}" : new org.json.JSONObject().put("path", path).toString();
                     String script = "window.__pickerProbe=null;(async()=>{try{const r=await fetch('api/directoryPicker/list',"
@@ -192,7 +203,7 @@ public class ExternalWorkspaceTest {
                 awaitPage(scenario, browser, "(()=>{const input=document.querySelector('input[aria-label=\"编辑路径\"],input[aria-label=\"Edit path\"]');"
                     + "return input?.value===" + expected + "})()", "Official picker starts in phone storage");
             } finally {
-                scenario.onActivity(activity -> { if (injection.get() != null) injection.get().remove(); browser.get().destroy(); });
+                scenario.onActivity(activity -> { if (injection.get() != null) injection.get().remove(); if (taskEvents.get() != null) taskEvents.get().close(); browser.get().destroy(); });
             }
         }
     }
