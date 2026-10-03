@@ -25,11 +25,15 @@ final class RuntimeProcesses {
                         if (stamp != null && stamp.parent == Process.myPid()) { roots.put(process, stamp); return process; }
                     } catch (NumberFormatException partial) { /* Shell may still be writing the small ticket. */ }
                 }
-                if (!process.isAlive()) throw new IOException("运行进程提前退出");
+                // A short command can finish before its PID is sampled. Its Process still owns
+                // the exit status and output; let the caller drain them and decide success/failure.
+                // Only live processes need the verified stamp used for later tree termination.
+                if (!process.isAlive()) return process;
                 Thread.sleep(10);
             }
+            if (!process.isAlive()) return process;
             throw new IOException("无法确认运行进程身份，已停止启动");
-        } catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); throw new IOException("启动已中断", interrupted); }
+        } catch (InterruptedException interrupted) { process.destroy(); Thread.currentThread().interrupt(); throw new IOException("启动已中断", interrupted); }
         catch (IOException error) { process.destroy(); throw error; }
         finally { ticket.delete(); }
     }

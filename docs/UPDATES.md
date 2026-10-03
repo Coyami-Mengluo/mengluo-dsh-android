@@ -33,7 +33,7 @@
 
 ## 手动发布
 
-1. 更新 `app/build.gradle` 的版本名与递增 `versionCode`，更新 CHANGELOG。`0.0.1` 的内部序号是 2，以覆盖早期私有测试包；公开 `0.0.3` 使用 5，以覆盖同名本地测试包的序号 4。
+1. 更新 `app/build.gradle` 的版本名与递增 `versionCode`，更新 CHANGELOG。`0.0.1` 的内部序号是 2，以覆盖早期私有测试包；公开 `0.0.3` 使用 5，以覆盖同名本地测试包的序号 4；公开 `0.0.8` 使用 11，以覆盖同名本地测试包的序号 10。
 2. 使用保存在仓库外 / 忽略目录内的长期签名密钥构建两种架构的 release APK。不可公开密钥、密码或 `local.properties`。
 3. `node scripts/verify-apk.mjs arm64-v8a release` 与 `x86_64 release` 验证架构与打包内容；用 SDK `apksigner verify` 验签。
 4. `node scripts/prepare-sources.mjs` 生成原生工具对应源码附件。Node/Ubuntu 不应出现在 APK 里。
@@ -43,8 +43,8 @@
 构建命令示例：
 
 ```powershell
-./scripts/build-release.ps1 -Abi arm64-v8a -SigningConfig <本地签名JSON> -VersionName 0.0.7 -VersionCode 9
-./scripts/build-release.ps1 -Abi x86_64 -SigningConfig <本地签名JSON> -VersionName 0.0.7 -VersionCode 9
+./scripts/build-release.ps1 -Abi arm64-v8a -SigningConfig <本地签名JSON> -VersionName 0.0.8 -VersionCode 11
+./scripts/build-release.ps1 -Abi x86_64 -SigningConfig <本地签名JSON> -VersionName 0.0.8 -VersionCode 11
 ```
 
 签名 JSON 字段：`keystore`（绝对路径）、`storePassword`、`keyAlias`、`keyPassword`。脚本仅通过当前进程环境传给 Gradle，不把密码写进源码。妥善离线备份密钥；丢失或更换签名会破坏覆盖安装和内置更新兼容性。其他贡献者需使用自己的密钥、包名与更新源，不能向原项目用户分发换签名的更新。

@@ -278,6 +278,9 @@ final class Engine {
         return spawn(command, isolatedHome, working, data, false);
     }
     Process spawn(List<String> command, File isolatedHome, File working, File data, boolean phoneStorage) throws IOException {
+        return spawn(command, isolatedHome, working, data, phoneStorage, List.of());
+    }
+    private Process spawn(List<String> command, File isolatedHome, File working, File data, boolean phoneStorage, List<String> nativeEnvironment) throws IOException {
         String libs = context.getApplicationInfo().nativeLibraryDir;
         RuntimePolicy.requireElf64(new File(libs, "libproot.so"), BuildConfig.RUNTIME_ABI);
         ArrayList<String> args = new ArrayList<>(List.of(libs + "/libproot.so", "--kill-on-exit", "-0", "-r", rootfs.getPath(),
@@ -289,6 +292,7 @@ final class Engine {
             "HOME=/root", "USER=root", "LANG=C.UTF-8", "TERM=xterm-256color", "TMPDIR=/tmp", "DEBIAN_FRONTEND=noninteractive",
             "PATH=" + RuntimePolicy.GUEST_PATH, "DSH_HOME=/root/.dsh", "DSH_TELEMETRY_DISABLED=1"));
         args.addAll(downloadSource.packageEnvironment());
+        args.addAll(nativeEnvironment);
         args.addAll(command);
         ProcessBuilder builder = new ProcessBuilder(args).directory(context.getFilesDir()).redirectErrorStream(true);
         ProotLibraries.configure(builder, new File(libs), new File(context.getCodeCacheDir(), "proot-host-libs"));
@@ -334,8 +338,14 @@ final class Engine {
                 int port;
                 try (ServerSocket socket = new ServerSocket(0, 1, InetAddress.getLoopbackAddress())) { port = socket.getLocalPort(); }
                 RuntimeStore.Slot active = versions.active(); if (active == null) throw new IOException("当前 Harness 安装不完整");
-                Process process = spawn(List.of("/opt/node/bin/node", "--expose-internals", active.cli(),
-                    "web", "--host", "127.0.0.1", "--port", Integer.toString(port), "--no-open"), null, workspace, profile, true);
+                List<String> nativeEnvironment = List.of();
+                if (PhoneControl.supported(active.version)) {
+                    try {
+                        nativeEnvironment = PhoneControl.get(context).prepare(rootfs);
+                    } catch (IOException error) { PhoneControl.get(context).runtimeStopped(); note("[phone] 手机扩展未加载，不影响普通 Harness 使用"); }
+                }
+                List<String> command = PhoneControl.webCommand(active.cli(), port, !nativeEnvironment.isEmpty());
+                Process process = spawn(command, null, workspace, profile, true, nativeEnvironment);
                 synchronized (this) { if (epoch != generation) { RuntimeProcesses.stopAndWait(process, 3); cancelled(epoch); } backend = process; }
                 readers.execute(() -> consume(process, value -> {
                     String url = readyAddress(value);
@@ -359,13 +369,14 @@ final class Engine {
                     catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
                 });
                 main.postDelayed(() -> startupTimedOut(process, epoch), 120_000);
-            } catch (Exception error) { note("启动失败：" + error); synchronized (this) { if (epoch == generation) { busy = false; event("启动失败：" + error.getMessage()); } } }
+            } catch (Exception error) { PhoneControl.get(context).runtimeStopped(); note("启动失败：" + error); synchronized (this) { if (epoch == generation) { busy = false; event("启动失败：" + error.getMessage()); } } }
         });
     }
     synchronized void backendExited(Process process, long epoch, int code) {
         boolean current = backend == process && generation == epoch;
         note("[runtime] Harness 已退出，退出码 " + code + (current ? "（进程自行结束）" : "（已请求停止）"));
         if (current) {
+            PhoneControl.get(context).runtimeStopped();
             backend = null; readyUrl = null; busy = false;
             event("Harness 已停止（" + code + "），工作区与安装版本保留");
         }
@@ -377,6 +388,7 @@ final class Engine {
         event("启动超过 120 秒，请查看日志");
     }
     synchronized void stop() {
+        PhoneControl.get(context).runtimeStopped();
         generation++;
         Process job = operation, process = backend;
         if (job != null || process != null || busy) note("[runtime] 已请求停止运行进程，工作区与安装版本保留");

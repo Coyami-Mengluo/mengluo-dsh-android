@@ -3,8 +3,13 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <queries>
+        <intent><action android:name="android.intent.action.MAIN" /><category android:name="android.intent.category.LAUNCHER" /></intent>
+    </queries>
     <!-- Optional public project access. Requested only through the explicit file-permission entry. -->
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" tools:ignore="ScopedStorage" />
     <application android:theme="@style/AppTheme" android:label="MengLuo DSH Android"
@@ -25,9 +30,16 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity android:name=".PhoneCaptureActivity" android:exported="false" android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+        <service android:name=".PhoneCaptureService" android:exported="false" android:foregroundServiceType="mediaProjection" />
         <service android:name=".EngineService" android:exported="false" android:foregroundServiceType="specialUse">
             <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="User-started local coding runtime. Visible notification provides a stop action; no phone control or external file access." />
+                android:value="User-started local coding runtime and explicitly approved phone tasks. Visible notification and cross-app stop pill; no boot restart or silent grants." />
+        </service>
+        <service android:name=".PhoneAccess" android:label="@string/phone_accessibility_label"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE" android:exported="true">
+            <intent-filter><action android:name="android.accessibilityservice.AccessibilityService" /></intent-filter>
+            <meta-data android:name="android.accessibilityservice" android:resource="@xml/phone_accessibility" />
         </service>
     </application>
 </manifest>

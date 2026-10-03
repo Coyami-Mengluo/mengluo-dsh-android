@@ -1,0 +1,3 @@
+- insert:
+    - id: mengluo-android-phone
+      name: /opt/mengluo-phone/plugin.mjs

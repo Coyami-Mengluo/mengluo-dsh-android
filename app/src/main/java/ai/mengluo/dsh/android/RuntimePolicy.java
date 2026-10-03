@@ -34,7 +34,8 @@ public final class RuntimePolicy {
         } catch (Exception ignored) { return false; }
     }
     public static String redact(String text) {
-        return text.replaceAll("(?i)([?&#]token=)[^\\s&#\"'<>]+", "$1[REDACTED]")
+        return text.replaceAll("(?i)(ML_PHONE_TOKEN[\"']?\\s*[:=]\\s*[\"']?)[^\\s,;\"'<>]+", "$1[REDACTED]")
+            .replaceAll("(?i)([?&#]token=)[^\\s&#\"'<>]+", "$1[REDACTED]")
             .replaceAll("(?i)(bearer\\s+)[A-Za-z0-9._~+/-]+=*", "$1[REDACTED]")
             .replaceAll("(?i)((?:[a-z0-9_]*api[_-]?key|access_token|refresh_token|_authToken)[\"']?\\s*[:=]\\s*[\"']?)[^\\s,;\"'<>]+", "$1[REDACTED]")
             .replaceAll("(?i)(https?://)[^\\s/@:]+:[^\\s/@]+@", "$1[REDACTED]@")

@@ -1,0 +1,15 @@
+// Opt-in device tests use different package IDs and a fresh app UID, never the installed client.
+gradle.beforeProject { project ->
+    project.pluginManager.withPlugin('com.android.application') {
+        def probeRoot = project.rootProject.file('.tools/phone-probe')
+        project.layout.buildDirectory.set(new File(probeRoot, 'build'))
+        project.androidComponents.finalizeDsl { android ->
+            android.defaultConfig.applicationId = 'ai.mengluo.dsh.android.phoneprobe'
+            android.defaultConfig.testApplicationId = 'ai.mengluo.dsh.android.phoneprobe.test'
+            android.sourceSets.debug.manifest.srcFile(project.rootProject.file('scripts/phone-probe-manifest.xml'))
+            android.sourceSets.androidTest.java.setSrcDirs([project.file('src/androidTest/java')])
+            android.sourceSets.androidTest.java.setIncludes(['**/PhoneProbeTest.java', '**/PhoneFixtureActivity.java', '**/RuntimeProcessesTest.java'])
+            android.sourceSets.androidTest.manifest.srcFile(project.rootProject.file('scripts/phone-probe-test-manifest.xml'))
+        }
+    }
+}

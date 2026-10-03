@@ -18,14 +18,17 @@ public final class EngineService extends Service {
     }
     @Override public int onStartCommand(Intent intent, int flags, int id) {
         Engine engine = Engine.get(this);
+        if (intent != null && PhoneControl.STOP.equals(intent.getAction())) { PhoneControl.get(this).stop("user_cancelled"); return START_NOT_STICKY; }
         if (intent != null && "stop".equals(intent.getAction())) { engine.stop(); stopSelf(); return START_NOT_STICKY; }
         PendingIntent open = PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class), PendingIntent.FLAG_IMMUTABLE);
         PendingIntent stop = PendingIntent.getService(this, 1, new Intent(this, EngineService.class).setAction("stop"), PendingIntent.FLAG_IMMUTABLE);
+        PendingIntent stopPhone = PendingIntent.getService(this, 322, new Intent(this, EngineService.class).setAction(PhoneControl.STOP), PendingIntent.FLAG_IMMUTABLE);
         Notification notification = new Notification.Builder(this, CHANNEL)
             .setContentTitle("MengLuo · 本地代码工作区")
             .setContentText("点击返回工作区，或停止当前运行")
             .setSmallIcon(android.R.drawable.ic_menu_edit).setContentIntent(open).setOngoing(true)
-            .addAction(new Notification.Action.Builder(null, "停止", stop).build()).build();
+            .addAction(new Notification.Action.Builder(null, "停止手机操作", stopPhone).build())
+            .addAction(new Notification.Action.Builder(null, "停止 Harness", stop).build()).build();
         if (Build.VERSION.SDK_INT >= 34) startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
         else startForeground(1, notification);
         if (intent != null && "apk-download".equals(intent.getAction())) AndroidUpdates.get(this).download();

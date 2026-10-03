@@ -350,6 +350,7 @@ public final class MainActivity extends AppCompatActivity {
         content.addView(ui.caption("MengLuo · 让创作更简单")); ui.gap(content, 14);
         content.addView(ui.button("回到 Harness", R.drawable.ic_arrow, true, () -> { sheet.dismiss(); showHarness(); }), new LinearLayout.LayoutParams(-1, -2));
         ui.gap(content, 10); content.addView(pageZoom.controls(ui));
+        content.addView(ui.button("手机操作权限", R.drawable.ic_home, false, () -> { sheet.dismiss(); showPhonePermissions(); }));
         content.addView(ui.pair(ui.button("手机文件访问", R.drawable.ic_workspace, false, () -> { sheet.dismiss(); workspaceDialog.show(); }),
             ui.button("任务通知", R.drawable.ic_task_notification, false, () -> { sheet.dismiss(); taskNotificationSettings.show(); })));
         String[] names = {"代码文件", "终端", "插件管理", "下载源", "更新管理", "权限说明", "运行环境", "运行日志"};
@@ -477,13 +478,25 @@ public final class MainActivity extends AppCompatActivity {
     @Override protected void onNewIntent(Intent intent) {
         super.onNewIntent(intent); setIntent(intent);
         if (TaskNotifications.OPEN.equals(intent.getAction()) && engine.readyUrl != null) showHarness();
+        routePhoneIntent();
     }
     @Override public void onRequestPermissionsResult(int request, String[] permissions, int[] results) {
         super.onRequestPermissionsResult(request, permissions, results);
         if (request == TaskNotifications.PERMISSION_REQUEST && taskNotificationSettings != null) taskNotificationSettings.refresh();
     }
     @Override public void onBackPressed() { if (web.getVisibility() == View.VISIBLE && web.canGoBack()) web.goBack(); else if (web.getVisibility() == View.VISIBLE) showHome(); else super.onBackPressed(); }
-    @Override protected void onResume() { super.onResume(); if (updates != null) updates.automaticCheck(); if (workspaceDialog != null) { workspaceDialog.onResume(); refresh(); } if (taskNotificationSettings != null) taskNotificationSettings.refresh(); if (engine != null && engine.readyUrl != null) TaskNotifications.get(this).requestOnce(this); }
+    @Override protected void onResume() { super.onResume(); PhoneControl.get(this).foreground(this); routePhoneIntent(); if (updates != null) updates.automaticCheck(); if (workspaceDialog != null) { workspaceDialog.onResume(); refresh(); } if (taskNotificationSettings != null) taskNotificationSettings.refresh(); if (engine != null && engine.readyUrl != null) TaskNotifications.get(this).requestOnce(this); }
+    @Override protected void onPause() { PhoneControl.get(this).background(this); super.onPause(); }
+    void showPhonePermissions() { PhonePermissions.show(this); }
+    void phoneOverlayChanged(boolean shown) { if (ball != null) ball.setVisibility(shown ? View.INVISIBLE : View.VISIBLE); }
+    private void routePhoneIntent() {
+        String action = getIntent().getAction(); if (!PhoneControl.OPEN.equals(action) && !PhoneControl.MENU.equals(action)) return;
+        getIntent().setAction(null); frame.post(() -> {
+            if (isFinishing() || isDestroyed()) return;
+            PhoneControl control = PhoneControl.get(this); control.foreground(this);
+            if (!control.state.live()) { if (PhoneControl.OPEN.equals(action)) showPhonePermissions(); else menu(); }
+        });
+    }
     @Override public void onWindowFocusChanged(boolean focused) { super.onWindowFocusChanged(focused); if (focused && updates != null) updateObserver.run(); }
     @Override protected void onDestroy() { updates.unlisten(updateObserver); updatesDialog.close(); ball.removeCallbacks(collapseBall); ball.animate().cancel(); engine.unlisten(observer); projectBrowser.close(); workspaceDialog.close(); logExporter.close(); permissionHelp.close(); webFiles.close(); webTaskEvents.close(); taskNotificationSettings.close(); systemFiles.close(); if (compatibilityScript != null) compatibilityScript.remove(); web.destroy(); super.onDestroy(); }
 }

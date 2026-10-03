@@ -1,0 +1,4 @@
+<resources>
+    <string name="phone_accessibility_label">MengLuo · 手机操作</string>
+    <string name="phone_accessibility_description">让 Harness 在你要求操作手机时读取界面并自动执行点击、长按、滑动、输入与截图。截图包含整屏可见内容（包括通知、键盘等），仅遮住本应用悬浮窗；文字和截图可能发送给你配置的模型服务。无障碍截图全黑时会另请你确认系统屏幕共享授权；停止任务即结束共享。敏感动作和需要询问的事项在悬浮药丸确认；可随时按停止。不会自动开启系统权限、操作密码框或绕过系统保护。</string>
+</resources>

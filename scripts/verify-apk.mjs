@@ -59,5 +59,8 @@ assert.ok(entries.includes('assets/file-open.js'))
 assert.ok(entries.includes('assets/directory-default.js'))
 assert.ok(entries.includes('assets/task-events.js'))
 assert.equal(digest(tar(['-xOf', apk, 'assets/task-events.js'])), digest(readFileSync(resolve(root, 'app/src/main/assets/task-events.js'))), 'Notification adapter must match the release source')
+for (const name of ['plugin.mjs', 'transport.mjs', 'patch.yml', 'skills/android-phone/SKILL.md']) {
+  assert.equal(digest(tar(['-xOf', apk, `assets/phone/${name}`])), digest(readFileSync(resolve(root, `app/src/main/assets/phone/${name}`))), 'Phone extension must match the release source')
+}
 for (const name of ['proot', 'libtalloc', 'libandroid-shmem']) assert.ok(entries.includes(`assets/notices/${name}-copyright.txt`))
 console.log(`APK structure, checksums and ${abi} runtime verified. SHA256 ${digest(readFileSync(apk))}`)
