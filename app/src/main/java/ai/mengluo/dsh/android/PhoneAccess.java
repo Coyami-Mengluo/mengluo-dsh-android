@@ -304,11 +304,15 @@ public final class PhoneAccess extends AccessibilityService {
         return selected;
     }
     void touch(Touch plan, Set<String> allowed, Supplier<PhoneScreenPolicy.Box> overlay, boolean confirmed, Consumer<JSONObject> callback) {
+        touch(plan, allowed, overlay, confirmed, false, callback);
+    }
+    void touch(Touch plan, Set<String> allowed, Supplier<PhoneScreenPolicy.Box> overlay, boolean confirmed,
+            boolean skipActionConfirmation, Consumer<JSONObject> callback) {
         try {
             List<Hit> current = validateTouch(plan.screen, plan.start, plan.end, allowed, overlay);
             boolean sameConfirmedTargets = List.of(plan.startHit, plan.endHit).equals(current);
             if (PhoneActionPolicy.needsConfirmationBeforeDispatch(current.get(0).label, current.get(1).label,
-                routineScroll(plan.start, plan.end, current.get(0)), confirmed, sameConfirmedTargets)) {
+                routineScroll(plan.start, plan.end, current.get(0)), confirmed, sameConfirmedTargets, skipActionConfirmation)) {
                 callback.accept(PhoneControl.result("confirmation_required").put("actionDispatched", false)
                     .put("reason", confirmed ? "confirmed_target_changed" : "action_risk_changed")
                     .put("instruction", "The action was NOT executed. The current action needs a new confirmation. Take a fresh screenshot and request the intended action with ask=true; do not bypass confirmation."));

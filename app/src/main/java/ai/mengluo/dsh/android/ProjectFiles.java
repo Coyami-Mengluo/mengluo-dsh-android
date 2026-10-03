@@ -125,6 +125,14 @@ final class ProjectFiles {
             Files.write(temporary, bytes);
             if (!readText(project, relative).equals(original)) throw new IOException("文件已被 Harness 或其他操作修改，请重新打开，未覆盖新内容");
             target = resolve(project, relative);
+            java.nio.file.attribute.PosixFileAttributeView permissions = Files.getFileAttributeView(
+                target.toPath(), java.nio.file.attribute.PosixFileAttributeView.class, LinkOption.NOFOLLOW_LINKS);
+            if (permissions != null) {
+                Set<java.nio.file.attribute.PosixFilePermission> mode = permissions.readAttributes().permissions();
+                // Public/FUSE storage can expose fixed modes: do not chmod when they already match.
+                if (!mode.equals(Files.getPosixFilePermissions(temporary, LinkOption.NOFOLLOW_LINKS)))
+                    Files.setPosixFilePermissions(temporary, mode);
+            }
             Files.move(temporary, target.toPath(), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
         } finally { Files.deleteIfExists(temporary); }
     }

@@ -38,11 +38,14 @@ test('real official SDK: registration, session identity, cancellation injection 
     let status = 'active';
     await ctx.plugin({ name: 'native-phone-sdk-test', inject, apply(inner) {
       installSkill(inner);
-      installTools(inner, async req => req.op === 'begin' ? { status: 'active', lease: 'private-lease', allowedApps: ['fixture'] } : { status });
+      installTools(inner, async req => req.op === 'begin' ? { status: 'active', lease: 'private-lease', allowedApps: ['fixture'], skipActionConfirmation: true } : { status, skipActionConfirmation: true });
     } });
     assert.equal(ctx.tools.schemas().filter(value => value.name.startsWith('phone_')).length, 9); assert.ok(ownerFor(agent));
     const run = (name, args = {}) => ctx.tools.execute({ callId: 'probe-' + Math.random(), name, arguments: args, agent, signal: AbortSignal.timeout(3000) });
     const begun = await run('phone_begin', { purpose: 'Read fixture' }); assert.equal(begun.value.status, 'active'); assert.equal(begun.value.lease, undefined);
+    assert.equal(begun.value.skipActionConfirmation, true);
+    assert.equal((await run('phone_begin', { purpose: 'Same fixture task' })).value.skipActionConfirmation, true);
+    assert.equal((await run('phone_status')).value.skipActionConfirmation, true);
     // Registration alone must not hide a schema regression: exercise both touch
     // outputs through the real SDK, including the uncertain-execution null value.
     for (const tool of ['phone_tap', 'phone_gesture']) {

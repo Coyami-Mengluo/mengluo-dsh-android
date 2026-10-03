@@ -58,6 +58,7 @@ public class PhoneProbeTest {
         PhoneOverlay[] fixture = new PhoneOverlay[1];
         int[] expandedWidth = new int[1];
         long[] shownAt = new long[1];
+        android.graphics.Bitmap[] compactArtwork = new android.graphics.Bitmap[1];
         Instrumentation.ActivityMonitor mainActivity = instrumentation.addMonitor(MainActivity.class.getName(), null, true);
         try {
             instrumentation.runOnMainSync(() -> {
@@ -88,6 +89,7 @@ public class PhoneProbeTest {
                 assertTrue("Stop affordance must stay attached at the edge", fixture[0].attached());
                 View view = (View)overlayFixtureValue(fixture[0], "view");
                 assertTrue("Collapsed handle must occupy less width", view.getWidth() > 0 && view.getWidth() < expandedWidth[0]);
+                compactArtwork[0] = assertCompactIconAndDrawFixture(fixture[0]);
                 View stop = findText(view, "停止"); assertNotNull(stop); assertEquals(View.GONE, stop.getVisibility());
                 assertTrue(((ImageButton)overlayFixtureValue(fixture[0], "icon")).performClick());
                 assertFalse("Tapping the edge must restore Stop", (boolean)overlayFixtureValue(fixture[0], "collapsed"));
@@ -95,6 +97,10 @@ public class PhoneProbeTest {
                 shownAt[0] = android.os.SystemClock.uptimeMillis();
             });
             instrumentation.waitForIdleSync();
+            File external = context.getExternalFilesDir(null); assertNotNull(external);
+            try (OutputStream output = new FileOutputStream(new File(external, "phone-overlay-compact.png"))) {
+                assertTrue(compactArtwork[0].compress(android.graphics.Bitmap.CompressFormat.PNG, 100, output));
+            } finally { compactArtwork[0].recycle(); compactArtwork[0] = null; }
             assertEquals("Opening Stop must not bring MainActivity over the task", 0, mainActivity.getHits());
             waitUntilOverlayUptime(shownAt[0] + 2400);
             instrumentation.waitForIdleSync();
@@ -133,9 +139,38 @@ public class PhoneProbeTest {
             });
             assertEquals("Neither edge expansion may launch MainActivity", 0, mainActivity.getHits());
         } finally {
+            if (compactArtwork[0] != null) compactArtwork[0].recycle();
             instrumentation.runOnMainSync(() -> { if (fixture[0] != null) fixture[0].hide(); });
             instrumentation.removeMonitor(mainActivity);
         }
+    }
+    private android.graphics.Bitmap assertCompactIconAndDrawFixture(PhoneOverlay fixture) {
+        ViewGroup view = (ViewGroup)overlayFixtureValue(fixture, "view");
+        ImageButton icon = (ImageButton)overlayFixtureValue(fixture, "icon");
+        WindowManager.LayoutParams position = (WindowManager.LayoutParams)overlayFixtureValue(fixture, "position");
+        PhoneOverlayGeometry.IconBox expected = PhoneOverlayGeometry.icon(true, context.getResources().getDisplayMetrics().density);
+        assertEquals(expected.width(), position.width);
+        assertEquals(expected.width(), view.getWidth()); assertEquals(expected.height(), view.getHeight());
+        assertEquals(expected.width(), icon.getLayoutParams().width); assertEquals(expected.height(), icon.getLayoutParams().height);
+        assertEquals(expected.width(), icon.getWidth()); assertEquals(expected.height(), icon.getHeight());
+        assertEquals(expected.horizontalPadding(), icon.getPaddingLeft()); assertEquals(expected.horizontalPadding(), icon.getPaddingRight());
+        assertEquals(expected.verticalPadding(), icon.getPaddingTop()); assertEquals(expected.verticalPadding(), icon.getPaddingBottom());
+        android.graphics.Rect iconBounds = new android.graphics.Rect(0, 0, icon.getWidth(), icon.getHeight());
+        view.offsetDescendantRectToMyCoords(icon, iconBounds);
+        assertTrue("The complete icon must stay inside the actual window", iconBounds.left >= 0 && iconBounds.top >= 0
+            && iconBounds.right <= view.getWidth() && iconBounds.bottom <= view.getHeight());
+        assertEquals(ImageView.ScaleType.FIT_CENTER, icon.getScaleType());
+        assertNotNull(icon.getDrawable());
+        android.graphics.RectF imageBounds = new android.graphics.RectF(icon.getDrawable().getBounds());
+        assertTrue(imageBounds.width() > 0 && imageBounds.height() > 0);
+        icon.getImageMatrix().mapRect(imageBounds); imageBounds.offset(icon.getPaddingLeft(), icon.getPaddingTop());
+        assertTrue("FIT_CENTER must retain the full artwork inside its content box", imageBounds.left >= icon.getPaddingLeft() - .5f
+            && imageBounds.top >= icon.getPaddingTop() - .5f && imageBounds.right <= icon.getWidth() - icon.getPaddingRight() + .5f
+            && imageBounds.bottom <= icon.getHeight() - icon.getPaddingBottom() + .5f);
+        // This draws only the self-created fixture view, never the display or another app.
+        android.graphics.Bitmap bitmap = android.graphics.Bitmap.createBitmap(view.getWidth(), view.getHeight(), android.graphics.Bitmap.Config.ARGB_8888);
+        view.draw(new android.graphics.Canvas(bitmap));
+        return bitmap;
     }
     @Test(timeout = 20000) public void activeOverlayWaitsForCompactLayoutAndRestoresOrdinaryPosition() throws Exception {
         Assume.assumeTrue("Requires explicit isolated overlay fixture opt-in",

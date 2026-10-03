@@ -29,8 +29,11 @@ final class RegistryClient {
         return Collections.unmodifiableList(result);
     }
     static Release official(String version) throws Exception {
+        return official(version, new OperationCancellation(Runnable::run));
+    }
+    static Release official(String version, OperationCancellation cancellation) throws Exception {
         return release(new JSONObject(UpdateHttp.text(DownloadSource.OFFICIAL.metadataUrl(NAME, version),
-            url -> url.startsWith("https://registry.npmjs.org/"), 1024 * 1024)));
+            url -> url.startsWith("https://registry.npmjs.org/"), 1024 * 1024, cancellation)));
     }
     static Release release(JSONObject pkg) throws Exception {
         String version = UpdatePolicy.version(pkg.getString("version"));
@@ -45,12 +48,18 @@ final class RegistryClient {
         checkVersion(source, "pnpm", PNPM_VERSION);
     }
     static void checkVersion(DownloadSource source, String name, String version) throws IOException {
+        checkVersion(source, name, version, new OperationCancellation(Runnable::run));
+    }
+    static void checkVersion(DownloadSource source, String name, String version, OperationCancellation cancellation) throws IOException {
+        cancellation.check();
         HttpURLConnection connection = (HttpURLConnection) new URL(source.metadataUrl(name, version)).openConnection();
         connection.setConnectTimeout(12_000); connection.setReadTimeout(12_000);
         connection.setInstanceFollowRedirects(false);
         connection.setRequestProperty("Accept", "application/json");
         try {
+            cancellation.watch(connection);
             int code = connection.getResponseCode();
+            cancellation.check();
             if (code == 404) throw new IOException(source == DownloadSource.MIRROR
                 ? "镜像尚未同步 " + name + " " + version + "，请稍后重试或切换官方源"
                 : "官方源未找到 " + name + " " + version);
@@ -58,9 +67,11 @@ final class RegistryClient {
             try (InputStream input = connection.getInputStream(); ByteArrayOutputStream bytes = new ByteArrayOutputStream()) {
                 byte[] buffer = new byte[8192]; int count;
                 while ((count = input.read(buffer)) != -1) {
+                    cancellation.check();
                     if (bytes.size() + count > 1024 * 1024) throw new IOException("版本信息过大，已停止读取");
                     bytes.write(buffer, 0, count);
                 }
+                cancellation.check();
                 JSONObject metadata = new JSONObject(bytes.toString(StandardCharsets.UTF_8.name()));
                 JSONObject dist = metadata.getJSONObject("dist");
                 URI tarball = new URI(dist.getString("tarball"));
@@ -70,6 +81,6 @@ final class RegistryClient {
             }
         } catch (IOException error) { throw error; }
         catch (Exception error) { throw new IOException("无法解析下载源版本信息", error); }
-        finally { connection.disconnect(); }
+        finally { cancellation.release(connection); connection.disconnect(); }
     }
 }

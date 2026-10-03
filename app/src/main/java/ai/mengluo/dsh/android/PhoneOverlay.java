@@ -40,13 +40,22 @@ final class PhoneOverlay {
         collapsed = value;
         int padding = active && !value ? ui.dp(10) : 0;
         view.setPadding(padding, padding, padding, padding);
-        view.setAlpha(value ? .65f : 1f);
+        view.setAlpha(value ? .85f : 1f);
         if (statusText != null) statusText.setVisibility(value ? View.GONE : View.VISIBLE);
         if (stopButton != null) stopButton.setVisibility(value ? View.GONE : View.VISIBLE);
+        PhoneOverlayGeometry.IconBox iconBox = applyIconGeometry(value);
         icon.setContentDescription(active && value ? "手机操作中，展开停止按钮" : "返回 MengLuo");
-        position.width = value ? ui.dp(25) : expandedWidth;
+        // Resize the child with the window: a 52dp child inside a narrow window
+        // is clipped, not scaled, even when its ImageView uses FIT_CENTER.
+        position.width = value ? iconBox.width() : expandedWidth;
         position.x = safeBounds().right - position.width - (value ? 0 : ui.dp(6));
         view.requestLayout(); update();
+    }
+    private PhoneOverlayGeometry.IconBox applyIconGeometry(boolean compact) {
+        PhoneOverlayGeometry.IconBox box = PhoneOverlayGeometry.icon(compact, context.getResources().getDisplayMetrics().density);
+        icon.setLayoutParams(new LinearLayout.LayoutParams(box.width(), box.height()));
+        icon.setPadding(box.horizontalPadding(), box.verticalPadding(), box.horizontalPadding(), box.verticalPadding());
+        return box;
     }
     PhoneOverlay(Context context, PhoneControl control) {
         // A service/application context does not inherit the Activity's Material theme.
@@ -112,8 +121,9 @@ final class PhoneOverlay {
         body.setBackground(ui.rounded(ui.color(R.color.surface), controlling ? 24 : 28)); body.setClipToOutline(true);
         LinearLayout row = new LinearLayout(context); row.setGravity(Gravity.CENTER_VERTICAL);
         icon = new ImageButton(context); icon.setImageResource(R.drawable.menu_icon); icon.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        icon.setBackground(ui.rounded(ui.color(R.color.surface), 28)); icon.setPadding(ui.dp(9), ui.dp(9), ui.dp(9), ui.dp(9));
-        icon.setContentDescription("返回 MengLuo"); row.addView(icon, new LinearLayout.LayoutParams(ui.dp(52), ui.dp(52)));
+        icon.setMinimumWidth(0); icon.setMinimumHeight(0);
+        icon.setBackground(ui.rounded(ui.color(R.color.surface), 28)); applyIconGeometry(false);
+        icon.setContentDescription("返回 MengLuo"); row.addView(icon);
         icon.setOnClickListener(v -> {
             if (collapsed) {
                 setCollapsed(false); scheduleCollapse();
@@ -185,7 +195,7 @@ final class PhoneOverlay {
     private void update() {
         if (!attached()) return;
         Rect safe = safeBounds();
-        position.x = Math.max(safe.left, Math.min(safe.right - (collapsed ? ui.dp(25) : position.width), position.x));
+        position.x = Math.max(safe.left, Math.min(safe.right - position.width, position.x));
         position.y = Math.max(ui.dp(6), Math.min(safe.bottom - view.getHeight() - ui.dp(8), position.y));
         if (position.x == appliedX && position.y == appliedY && position.width == appliedWidth) return;
         try { manager.updateViewLayout(view, position); appliedX = position.x; appliedY = position.y; appliedWidth = position.width; } catch (RuntimeException error) { hide(); control.stop("stop_ui_unavailable"); }

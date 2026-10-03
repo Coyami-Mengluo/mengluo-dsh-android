@@ -8,7 +8,7 @@ gradle.beforeProject { project ->
             android.defaultConfig.testApplicationId = 'ai.mengluo.dsh.android.phoneprobe.test'
             android.sourceSets.debug.manifest.srcFile(project.rootProject.file('scripts/phone-probe-manifest.xml'))
             android.sourceSets.androidTest.java.setSrcDirs([project.file('src/androidTest/java')])
-            android.sourceSets.androidTest.java.setIncludes(['**/PhoneProbeTest.java', '**/PhoneFixtureActivity.java', '**/RuntimeProcessesTest.java'])
+            android.sourceSets.androidTest.java.setIncludes(['**/PhoneProbeTest.java', '**/PhoneFixtureActivity.java', '**/RuntimeProcessesTest.java', '**/RuntimeRepairsTest.java', '**/PhoneConfirmationSettingsTest.java'])
             android.sourceSets.androidTest.manifest.srcFile(project.rootProject.file('scripts/phone-probe-test-manifest.xml'))
         }
     }

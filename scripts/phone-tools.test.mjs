@@ -54,6 +54,95 @@ test('mutations require consent and arguments cannot forge native identity', asy
     assert.equal(calls[1].op, 'action'); assert.equal(calls[1].lease, 'native-lease'); assert.equal(calls[1].owner, ownerFor(f.agent));
   } finally { f.close(); }
 });
+
+test('repeated begin preserves only the native boolean action-confirmation preference', async () => {
+  for (const nativeValue of [true, false, undefined, 'true']) {
+    const calls = [];
+    const f = fixture(async req => {
+      calls.push(req);
+      return { status: 'active', lease: 'private-lease', allowedApps: ['fixture'], skipActionConfirmation: nativeValue };
+    });
+    try {
+      const first = await f.call('phone_begin', { purpose: 'test' });
+      const repeated = await f.call('phone_begin', { purpose: 'same task', skipActionConfirmation: true });
+      assert.equal(first.lease, undefined);
+      assert.deepEqual(repeated, { status: 'active', allowedApps: ['fixture'], skipActionConfirmation: nativeValue === true });
+      assert.equal(calls.length, 1, 'Repeating begin must not re-request a task or change its native setting');
+    } finally { f.close(); }
+  }
+});
+
+test('the model cannot set the native action-confirmation preference through any tool', async () => {
+  const calls = [];
+  const f = fixture(async req => {
+    calls.push(req);
+    return req.op === 'begin' ? { status: 'active', lease: 'private-lease', skipActionConfirmation: false }
+      : { status: 'ok', skipActionConfirmation: false };
+  });
+  try {
+    for (const tool of f.tools.values()) {
+      assert.equal(tool.parameters.additionalProperties, false);
+      assert.equal(tool.parameters.properties.skipActionConfirmation, undefined);
+    }
+    const status = await f.call('phone_status', { skipActionConfirmation: true });
+    assert.equal(status.skipActionConfirmation, false);
+    const begun = await f.call('phone_begin', { purpose: 'test', skipActionConfirmation: true });
+    assert.equal(begun.skipActionConfirmation, false);
+    await f.call('phone_action', { action: 'click', ask: true, skipActionConfirmation: true });
+    await f.call('phone_tap', { screenshot: 'image', x: 20, y: 40, target: 'Send', ask: true, skipActionConfirmation: true });
+    await f.call('phone_gesture', { screenshot: 'image', gesture: 'long_press', x: 20, y: 40, target: 'Target', ask: true, skipActionConfirmation: true });
+    await f.call('phone_ask', { question: 'Use the first destination?', skipActionConfirmation: true });
+    assert.ok(calls.every(req => !Object.hasOwn(req, 'skipActionConfirmation')));
+    assert.ok(calls.filter(req => ['action', 'tap', 'gesture'].includes(req.op)).every(req => req.ask === true),
+      'Native settings, not the plugin, decide whether ask=true displays an approval');
+  } finally { f.close(); }
+});
+
+test('skip action confirmation never fabricates an answer to a real question', async () => {
+  for (const answer of ['confirmed', 'user_cancelled']) {
+    let answerQuestion, settled = false;
+    const calls = [];
+    const f = fixture(req => {
+      calls.push(req.op);
+      if (req.op === 'begin') return Promise.resolve({ status: 'active', lease: 'lease', skipActionConfirmation: true });
+      if (req.op === 'ask') return new Promise(resolve => { answerQuestion = resolve; });
+      return Promise.resolve({ status: 'model_cancelled' });
+    });
+    try {
+      await f.call('phone_begin', { purpose: 'test' });
+      const question = f.call('phone_ask', { question: 'Use the first destination?' }).then(value => { settled = true; return value; });
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(settled, false, 'A question must wait for the native human response even with the setting enabled');
+      assert.deepEqual(calls, ['begin', 'ask']);
+      answerQuestion({ status: answer });
+      assert.equal((await question).status, answer);
+      assert.equal(calls.filter(op => op === 'ask').length, 1);
+    } finally { f.close(); }
+  }
+});
+
+test('a native preference change cancels the old task and a new human task reads the new value', async () => {
+  const calls = [];
+  let skipActionConfirmation = true, status = 'active';
+  const f = fixture(async req => {
+    calls.push(req.op);
+    return req.op === 'begin' ? { status: 'active', lease: 'lease', skipActionConfirmation }
+      : { status, skipActionConfirmation };
+  });
+  try {
+    assert.equal((await f.call('phone_begin', { purpose: 'first' })).skipActionConfirmation, true);
+    status = 'user_cancelled'; skipActionConfirmation = false;
+    await f.plugin.poll();
+    assert.equal(f.notices.length, 1);
+    const count = calls.length;
+    assert.equal((await f.call('phone_begin', { purpose: 'same turn retry' })).status, 'user_cancelled');
+    assert.equal(calls.length, count, 'Changing settings must not authorize a restart');
+    f.agent.session.events.push({ type: 'user/message', data: { id: 'human-2', source: { kind: 'user' } } });
+    status = 'active';
+    assert.equal((await f.call('phone_begin', { purpose: 'new explicit task' })).skipActionConfirmation, false);
+    assert.equal((await f.call('phone_begin', { purpose: 'same new task' })).skipActionConfirmation, false);
+  } finally { f.close(); }
+});
 test('image coordinate actions preserve image metadata without exposing image bytes or forging authority', async () => {
   const calls = [], saved = [];
   const f = fixture(async req => {

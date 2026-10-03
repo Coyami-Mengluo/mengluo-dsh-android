@@ -7,6 +7,7 @@
 - 版本目录只从 `registry.npmjs.org/@deepseek-ai%2fdsh` 获取。缓存保存在本机，每天检查；手动检查间隔 30 秒。重试不叠加到几十分钟。
 - `npm install --package-lock-only` 从官方源确定依赖，验证包来源、版本与完整性；`npm ci` 按锁从所选源下载。安装脚本禁用。共享 npm 缓存复用已有包，不声称每次都是纯增量下载。
 - npm 安装最多 30 分钟，候选 Web 服务测试最多 120 秒。监听实际就绪端口，不假设固定端口。日志中的登录 token 脱敏。
+- 停止安装会取消正在进行的基础归档/版本元数据请求，并在校验、解压时检查取消状态；已校验的缓存可供下次复用，未完成的下载不会作为正式归档使用。用户取消不触发镜像回退，过期进度不会覆盖停止或新任务状态。
 - 首次安装 Ubuntu 的 Git、Python 和证书依赖时，ARM64 使用 `ubuntu-ports`，x86_64 使用 `ubuntu`。国内源为 USTC，索引/下载失败仅回退官方源一次，共用 15 分钟下载预算，本地安装上限 10 分钟；本地 dpkg 失败不通过换源重复安装。仅取 main/universe 二进制索引，跳过翻译。保留 Ubuntu 官方密钥环及严格 TLS 校验，基础环境缺少 CA 包时使用 Android 默认信任管理器提供的公开 CA 证书引导 HTTPS。私有 apt 源文件仅供安装器使用，不覆盖用户原有 apt 配置或关闭签名验证。
 - 配套 pnpm 同样先在官方源生成依赖锁，再由所选源下载锁定包。镜像不是可信元数据来源；官方版本元数据仍需可访问。
 - 下载阶段若明确报告 `dpkg was interrupted`，仅尝试一次 `dpkg --configure -a`，最多 10 分钟；成功后在原镜像继续下载，不重新获取索引。恢复耗时不占下载预算。恢复失败、包管理锁、权限不足或磁盘写入错误直接报本地状态错误，不换源、不删锁或清空 dpkg 数据库。
@@ -16,6 +17,8 @@
 - PRoot 启用 `--link2symlink` 和 `-L`，兼容 dpkg 状态备份及运行命令新建的硬链接。`PROOT_L2S_DIR` 固定为 rootfs 内的 `.l2s` 实际目录；这是运行环境持久数据，不能作为缓存清理或单独删除。APK 覆盖升级、重启及 Harness 槽位切换均保留它。项目文件浏览器不开放此目录，仍拒绝跟随宿主符号链接。
 - Android PRoot 通过应用 code cache 中的库名别名找到 APK 原生库，不使用 `LD_PRELOAD`；Ubuntu 子进程不再尝试加载 Android 库。别名随 APK 安装路径刷新，不修改原生库字节、rootfs 或项目文件。
 - Harness 启动、页面就绪、进程退出码、停止请求及启动超时写入持久日志。导出测试使用独立临时日志，不向实际运行历史写入填充数据；不自动清除已有历史日志。
+- 进程输出在读入时按行限长（24 Ki 字符），超长行整体省略并记录固定警告，避免拆分凭据后绕过脱敏；后续普通日志与就绪地址仍正常处理。没有换行的持续输出也不会无限积累。
+- 启动/执行命令时刷新 Android 当前网络的 DNS；断网时保留已有解析配置，没有旧配置则写入无服务器的注释文件，不阻止本地服务或命令。网络请求仍可能失败，恢复网络后再次启动或执行命令会刷新解析配置，不内置第三方 DNS。
 - 配套 pnpm 读取包的 `packageManager`；未声明时使用记录的默认版本。Node 是基础环境版本（当前 24.19.0）；使用 `--engine-strict` 和实际启动测试拒绝不兼容候选。此版不自动升级 Node/Ubuntu，也不承诺兼容官方所有历史/未来版本。
 - 原子状态在切换时立即同步落盘，不依赖正常退出 App。旧 schema 2 安装记录直接读取，无需重装。保留上一版运行程序，但不回退官方已修改的用户数据；降级前导出重要文件。
 - 失败的候选不会成为 active。当前不自动清理旧/失败槽位，以避免误删；长期反复安装会占用额外空间。
@@ -43,8 +46,8 @@
 构建命令示例：
 
 ```powershell
-./scripts/build-release.ps1 -Abi arm64-v8a -SigningConfig <本地签名JSON> -VersionName 0.0.8 -VersionCode 11
-./scripts/build-release.ps1 -Abi x86_64 -SigningConfig <本地签名JSON> -VersionName 0.0.8 -VersionCode 11
+./scripts/build-release.ps1 -Abi arm64-v8a -SigningConfig <本地签名JSON> -VersionName 0.0.9 -VersionCode 12
+./scripts/build-release.ps1 -Abi x86_64 -SigningConfig <本地签名JSON> -VersionName 0.0.9 -VersionCode 12
 ```
 
 签名 JSON 字段：`keystore`（绝对路径）、`storePassword`、`keyAlias`、`keyPassword`。脚本仅通过当前进程环境传给 Gradle，不把密码写进源码。妥善离线备份密钥；丢失或更换签名会破坏覆盖安装和内置更新兼容性。其他贡献者需使用自己的密钥、包名与更新源，不能向原项目用户分发换签名的更新。

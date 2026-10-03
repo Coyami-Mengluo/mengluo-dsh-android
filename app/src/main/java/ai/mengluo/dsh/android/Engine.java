@@ -8,7 +8,6 @@ import org.json.*;
 import java.io.*;
 import java.net.*;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.Consumer;
@@ -32,6 +31,7 @@ final class Engine {
     private final ArrayList<Consumer<Engine>> listeners = new ArrayList<>();
     private final RuntimeLog log;
     private volatile Process backend, operation;
+    private OperationCancellation installation;
     private volatile long generation;
     volatile boolean busy;
     volatile boolean checkingSource;
@@ -97,6 +97,7 @@ final class Engine {
         eventPending = true;
         main.postDelayed(() -> { synchronized (Engine.this) { eventPending = false; for (Consumer<Engine> listener : new ArrayList<>(listeners)) listener.accept(this); } }, 100);
     }
+    private synchronized void event(long epoch, String value) { if (epoch == generation) event(value); }
     boolean installed() {
         return versions.active() != null;
     }
@@ -106,15 +107,22 @@ final class Engine {
     }
     void install(String targetVersion) {
         UpdatePolicy.version(targetVersion);
-        synchronized (this) { if (busy || checkingSource || backend != null) return; busy = true; }
+        final long epoch;
+        final OperationCancellation cancellation;
+        synchronized (this) {
+            if (busy || checkingSource || backend != null) return;
+            busy = true; epoch = generation;
+            installation = cancellation = new OperationCancellation(readers);
+        }
         DownloadSource source = downloadSource;
-        event("准备安装 · " + source.title);
-        long epoch = generation;
+        Consumer<String> progress = value -> event(epoch, value);
+        progress.accept("准备安装 · " + source.title);
         work.execute(() -> {
             try {
-                event("检查下载源及 Harness 目标版本 · " + source.title);
-                RegistryClient.Release release = RegistryClient.official(targetVersion);
-                RegistryClient.checkVersion(source, RegistryClient.NAME, targetVersion);
+                cancellation.check();
+                progress.accept("检查下载源及 Harness 目标版本 · " + source.title);
+                RegistryClient.Release release = RegistryClient.official(targetVersion, cancellation);
+                RegistryClient.checkVersion(source, RegistryClient.NAME, targetVersion, cancellation);
                 cancelled(epoch);
                 File runtime = rootfs.getParentFile(); runtime.mkdirs();
                 if (!new File(rootfs, "opt/node/bin/node").isFile()) {
@@ -131,38 +139,47 @@ final class Engine {
                         cancelled(epoch);
                         JSONObject asset = assets.getJSONObject(i);
                         String name = asset.getString("name");
-                        File copy = RuntimeAssets.obtain(context.getCacheDir(), asset, source, this::event);
+                        File copy = RuntimeAssets.obtain(context.getCacheDir(), asset, source, progress, cancellation);
                         cancelled(epoch);
-                        event("校验并解压 " + name);
-                        ArchiveInstaller.verify(copy, asset.getString("sha256"));
+                        progress.accept("校验并解压 " + name);
+                        ArchiveInstaller.verify(copy, asset.getString("sha256"), cancellation);
                         File destination = name.startsWith("node") ? new File(staging, "opt/node") : staging;
                         destination.mkdirs();
-                        ArchiveInstaller.extract(copy, destination, name.startsWith("node") ? 1 : 0, this::event);
+                        ArchiveInstaller.extract(copy, destination, name.startsWith("node") ? 1 : 0, progress, cancellation);
                         cancelled(epoch);
                         copy.delete();
                     }
+                    cancelled(epoch);
                     if (!staging.renameTo(rootfs)) throw new IOException("无法保存基础运行环境");
                 }
                 prepareDirectories();
-                event("检查本机 Node 和 Bash");
+                progress.accept("检查本机 Node 和 Bash");
                 run(List.of("/opt/node/bin/node", "-e", "console.log('node='+process.version+' platform='+process.platform+' arch='+process.arch)"), 30, epoch);
                 if (!installed() || !new File(rootfs, "usr/bin/git").isFile() || !new File(rootfs, "usr/bin/python3").exists()
                     || !new File(rootfs, "etc/ssl/certs/ca-certificates.crt").isFile()) {
                     AptSetup.prepare(rootfs, BuildConfig.RUNTIME_ABI, SystemCertificates.pem());
                     AptSetup.install(source, BuildConfig.RUNTIME_ABI, (command, seconds) -> run(command, seconds, epoch),
-                        message -> { note(message); event(message); }, () -> cancelled(epoch));
+                        message -> { note(message); progress.accept(message); }, () -> cancelled(epoch));
                 }
-                RuntimeStore.Slot candidate = installCandidate(release, source, epoch);
-                event("隔离启动测试 · " + targetVersion + " · 上限 120 秒");
+                RuntimeStore.Slot candidate = installCandidate(release, source, epoch, cancellation);
+                progress.accept("隔离启动测试 · " + targetVersion + " · 上限 120 秒");
                 smoke(candidate, epoch);
                 cancelled(epoch);
                 versions.activate(candidate);
-                event("Harness " + targetVersion + " 已安装并切换 · 可以启动");
-            } catch (Exception error) { note("安装失败：" + error); if (epoch == generation) event("安装失败：" + error.getMessage()); }
-            finally { synchronized (this) { if (epoch == generation) { busy = false; event(status); } } }
+                progress.accept("Harness " + targetVersion + " 已安装并切换 · 可以启动");
+            } catch (Exception error) {
+                if (epoch != generation) note("[runtime] 安装已停止，工作区与安装版本保留");
+                else { note("安装失败：" + error); progress.accept("安装失败：" + error.getMessage()); }
+            } finally {
+                synchronized (this) {
+                    if (installation == cancellation) installation = null;
+                    if (epoch == generation) { busy = false; event(status); }
+                }
+            }
         });
     }
-    private RuntimeStore.Slot installCandidate(RegistryClient.Release release, DownloadSource source, long epoch) throws Exception {
+    private RuntimeStore.Slot installCandidate(RegistryClient.Release release, DownloadSource source, long epoch, OperationCancellation cancellation) throws Exception {
+        cancellation.check();
         String guest = "/opt/harness-slots/v" + release.version + "-" + UUID.randomUUID();
         File directory = RuntimePolicy.inside(rootfs, guest.substring(1)); directory.mkdirs();
         File config = new File(directory, "npmrc"); IO.text(config, ""); IO.text(new File(directory, "npmrc.global"), "");
@@ -170,26 +187,26 @@ final class Engine {
         ArrayList<String> args = npmArguments(guest, "install", DownloadSource.OFFICIAL);
         args.add("--package-lock-only"); args.add("@deepseek-ai/dsh@" + release.version);
         long deadline = System.nanoTime() + TimeUnit.MINUTES.toNanos(30);
-        event("解析官方依赖 · " + release.version + " · 安装上限 30 分钟");
+        event(epoch, "解析官方依赖 · " + release.version + " · 安装上限 30 分钟");
         run(args, remaining(deadline), epoch);
         run(List.of("/opt/node/bin/node", guest + "/verify.mjs", guest, release.version, release.integrity), 30, epoch);
         String trustedLock = IO.text(new File(directory, "package-lock.json"));
-        event("下载并安装 " + release.version + " · " + source.title + " · 复用 npm 缓存");
+        event(epoch, "下载并安装 " + release.version + " · " + source.title + " · 复用 npm 缓存");
         run(npmArguments(guest, "ci", source), remaining(deadline), epoch);
         if (!trustedLock.equals(IO.text(new File(directory, "package-lock.json")))) throw new IOException("官方依赖锁被改动，已拒绝切换");
         JSONObject pkg = new JSONObject(IO.text(new File(directory, "node_modules/@deepseek-ai/dsh/package.json")));
         String manager = pkg.optString("packageManager", "pnpm@" + RegistryClient.PNPM_VERSION);
         if (!manager.matches("pnpm@[0-9]+\\.[0-9]+\\.[0-9]+(?:\\+sha[0-9]+\\.[a-fA-F0-9]+)?")) throw new IOException("新版配套包管理器尚不支持，请更新客户端");
         String pnpm = manager.substring(5).split("\\+", 2)[0]; UpdatePolicy.version(pnpm);
-        RegistryClient.checkVersion(source, "pnpm", pnpm);
-        event("解析官方配套 pnpm " + pnpm);
+        RegistryClient.checkVersion(source, "pnpm", pnpm, cancellation);
+        event(epoch, "解析官方配套 pnpm " + pnpm);
         new File(directory, "tools").mkdirs();
         IO.text(new File(directory, "tools/npmrc"), ""); IO.text(new File(directory, "tools/npmrc.global"), "");
         ArrayList<String> tools = npmArguments(guest + "/tools", "install", DownloadSource.OFFICIAL);
         tools.add("--package-lock-only"); tools.add("pnpm@" + pnpm);
         run(tools, remaining(deadline), epoch);
         String toolsLock = IO.text(new File(directory, "tools/package-lock.json"));
-        event("下载配套 pnpm " + pnpm + " · " + source.title);
+        event(epoch, "下载配套 pnpm " + pnpm + " · " + source.title);
         run(npmArguments(guest + "/tools", "ci", source), remaining(deadline), epoch);
         if (!toolsLock.equals(IO.text(new File(directory, "tools/package-lock.json")))) throw new IOException("配套 pnpm 依赖锁被改动，已拒绝切换");
         RuntimeStore.Slot slot = new RuntimeStore.Slot(release.version, guest, pnpm);
@@ -254,13 +271,10 @@ final class Engine {
         for (String dir : List.of("root/.dsh", "root/.npm", "tmp", "workspace", "opt/harness", "proc", "sys", "dev", "etc")) new File(rootfs, dir).mkdirs();
         // Android's network-selected DNS is inherited via explicit userland resolver addresses.
         File resolv = new File(rootfs, "etc/resolv.conf");
-        if (Files.isSymbolicLink(resolv.toPath())) Files.delete(resolv.toPath());
         android.net.ConnectivityManager cm = context.getSystemService(android.net.ConnectivityManager.class);
-        android.net.LinkProperties links = cm.getLinkProperties(cm.getActiveNetwork());
-        StringBuilder dns = new StringBuilder();
-        if (links != null) for (InetAddress server : links.getDnsServers()) dns.append("nameserver ").append(server.getHostAddress()).append('\n');
-        if (dns.length() == 0) throw new IOException("没有可用的网络 DNS，请连接网络后重试");
-        IO.text(resolv, dns.toString());
+        android.net.Network network = cm == null ? null : cm.getActiveNetwork();
+        android.net.LinkProperties links = network == null ? null : cm.getLinkProperties(network);
+        RuntimeDns.update(resolv, links == null ? List.of() : links.getDnsServers());
         File dsh = new File(rootfs, "usr/local/bin/dsh"); dsh.getParentFile().mkdirs();
         RuntimeStore.Slot active = versions.active();
         String cli = active == null ? "/opt/harness/node_modules/@deepseek-ai/dsh/lib/bin.js" : active.cli();
@@ -303,9 +317,8 @@ final class Engine {
         return RuntimeProcesses.launch(builder, context.getCacheDir());
     }
     private void consume(Process process, Consumer<String> line) {
-        try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
-            String value;
-            while ((value = reader.readLine()) != null) { note(value); line.accept(value); }
+        try (Reader reader = new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8)) {
+            RuntimeOutput.read(reader, value -> { note(value); line.accept(value); });
         } catch (IOException error) { note("输出流已结束：" + error.getMessage()); }
     }
     private void run(List<String> command, int seconds, long epoch) throws Exception {
@@ -390,6 +403,7 @@ final class Engine {
     synchronized void stop() {
         PhoneControl.get(context).runtimeStopped();
         generation++;
+        if (installation != null) installation.cancel();
         Process job = operation, process = backend;
         if (job != null || process != null || busy) note("[runtime] 已请求停止运行进程，工作区与安装版本保留");
         backend = null; readyUrl = null;

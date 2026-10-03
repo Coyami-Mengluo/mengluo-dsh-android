@@ -123,4 +123,13 @@ public class ArchiveInstallerTest {
             file("original", "safe"), hard("copy", "original")), root, 0, files, 1024);
         assertEquals(Arrays.asList("bin=usr/bin", "mtab=/proc/mounts"), files.symlinks);
     }
+    @Test public void cancellationDuringExtractionPreventsFurtherFilesAndLinks() throws Exception {
+        File root = temporary.newFolder(); OperationCancellation cancellation = new OperationCancellation(Runnable::run);
+        TestFiles files = new TestFiles() {
+            @Override public void chmod(File file, int mode) { super.chmod(file, mode); cancellation.cancel(); }
+        };
+        File archive = archive(file("first", "content"), file("second", "never"), symbolic("alias", "first"));
+        assertThrows(OperationCancellation.Stopped.class, () -> ArchiveInstaller.extract(archive, root, 0, ignored -> {}, files, 1024, cancellation));
+        assertFalse(new File(root, "second").exists()); assertTrue(files.symlinks.isEmpty());
+    }
 }

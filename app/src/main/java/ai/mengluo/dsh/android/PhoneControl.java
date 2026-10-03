@@ -22,6 +22,7 @@ final class PhoneControl {
     final PhoneControlState state = new PhoneControlState();
     final Handler main = new Handler(Looper.getMainLooper());
     private final PhoneOverlay overlay;
+    private final SharedPreferences preferences;
     private final Set<String> apps = new HashSet<>();
     private final Set<String> calls = new HashSet<>();
     private WeakReference<MainActivity> activity = new WeakReference<>(null);
@@ -43,7 +44,18 @@ final class PhoneControl {
             syncUi(); main.postDelayed(this, 1000);
         }
     };
-    private PhoneControl(Context context) { this.context = context; overlay = new PhoneOverlay(context, this); }
+    private PhoneControl(Context context) {
+        this.context = context; overlay = new PhoneOverlay(context, this);
+        preferences = context.getSharedPreferences("phone-control", Context.MODE_PRIVATE);
+    }
+    boolean skipActionConfirmation() { return preferences.getBoolean("skip-action-confirmation", false); }
+    /** User-operated native setting. Changing it revokes any pending task instead of approving it. */
+    void skipActionConfirmation(boolean enabled) {
+        if (Looper.myLooper() != Looper.getMainLooper()) throw new IllegalStateException("Phone settings require main looper");
+        if (enabled == skipActionConfirmation()) return;
+        preferences.edit().putBoolean("skip-action-confirmation", enabled).apply();
+        stopNow("user_cancelled");
+    }
     static final class Reply extends JSONObject {
         @Override public Reply put(String name, Object value) { try { super.put(name, value); return this; } catch (JSONException e) { throw new IllegalArgumentException(e); } }
         @Override public Reply put(String name, int value) { return put(name, Integer.valueOf(value)); }
@@ -99,6 +111,7 @@ final class PhoneControl {
     String permissionSummary() {
         return "无障碍：" + (enabled() ? PhoneAccess.connected != null ? "已连接" : "已开启，等待系统连接" : "未授权")
             + "\n跨应用悬浮窗：" + (Settings.canDrawOverlays(context) ? "已授权" : "未授权")
+            + "\n免逐次确认：" + (skipActionConfirmation() ? "已开启" : "已关闭")
             + "\n兼容截图：" + (PhoneCaptureService.available() ? "本次屏幕共享已授权" : "仅在无障碍截图全黑时请求系统授权")
             + "\n运行环境：" + (runtime ? "手机控制桥接已启动" : "启动受支持的 Harness 0.2 系列后接入");
     }
@@ -142,6 +155,7 @@ final class PhoneControl {
             state.touch(owner, SystemClock.elapsedRealtime());
             response.complete(result(state.phase(owner)).put("accessibilityEnabled", enabled()).put("accessibilityConnected", PhoneAccess.connected != null)
                 .put("overlayPermission", Settings.canDrawOverlays(context)).put("stopVisible", overlay.attached())
+                .put("skipActionConfirmation", skipActionConfirmation())
                 .put("screenshotMode", "full_display").put("maskedOwnOverlay", true).put("imageCoordinateTaps", true)
                 .put("gestures", new JSONArray(List.of("long_press", "swipe")))
                 .put("screenSharingActive", PhoneCaptureService.available())
@@ -187,7 +201,8 @@ final class PhoneControl {
                 PhoneAccess.Touch touch = op.equals("tap") || op.equals("gesture") ? PhoneAccess.connected.planTouch(input, op.equals("gesture"), apps, overlay::screenBounds) : null;
                 pending = response;
                 boolean needsConfirmation = (action != null || touch != null)
-                    && (input.optBoolean("ask") || (action != null ? action.needsConfirmation() : touch.needsConfirmation()));
+                    && PhoneActionPolicy.needsActionConfirmation(skipActionConfirmation(), input.optBoolean("ask"),
+                        action != null ? action.needsConfirmation() : touch.needsConfirmation());
                 Runnable execute = () -> {
                     if (!state.allowed(owner, lease) || !ready()) { stopNow("permission_lost"); return; }
                     confirmAction = null; confirmation = "";
@@ -209,7 +224,7 @@ final class PhoneControl {
                             overlay.whenAttached(() -> pending == response, () -> {
                                 if (pending != response) return;
                                 if (!state.allowed(owner, lease) || !ready()) { stopNow("permission_lost"); return; }
-                                PhoneAccess.connected.touch(touch, Set.copyOf(apps), overlay::screenBounds, needsConfirmation, value -> {
+                                PhoneAccess.connected.touch(touch, Set.copyOf(apps), overlay::screenBounds, needsConfirmation, skipActionConfirmation(), value -> {
                                     if (state.allowed(owner, lease) && ready()) response.complete(value);
                                     else response.complete(result(state.phase(owner)));
                                     if (pending == response) pending = null; syncUi();
@@ -277,7 +292,8 @@ final class PhoneControl {
         overlay.whenCompact(() -> pending == response, () -> {
             if (pending != response || !state.allowed(owner, lease)) return;
             if (!ready()) { stopNow("permission_lost"); return; }
-            response.complete(result("active").put("lease", lease).put("allowedApps", new JSONArray(apps))); pending = null;
+            response.complete(result("active").put("lease", lease).put("allowedApps", new JSONArray(apps))
+                .put("skipActionConfirmation", skipActionConfirmation())); pending = null;
             context.getSystemService(NotificationManager.class).cancel(321);
         });
     }

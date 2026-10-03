@@ -4,6 +4,21 @@ import org.junit.Test;
 import static org.junit.Assert.*;
 
 public class PhonePolicyTest {
+    @Test public void onlyNativeOptInSkipsRequestedAndRiskBasedActionConfirmation() {
+        for (boolean requested : new boolean[]{false, true}) for (boolean risky : new boolean[]{false, true}) {
+            assertEquals(requested || risky, PhoneActionPolicy.needsActionConfirmation(false, requested, risky));
+            assertFalse(PhoneActionPolicy.needsActionConfirmation(true, requested, risky));
+        }
+    }
+    @Test public void optInAlsoSkipsTheDispatchRecheckWithoutInventingTargetApproval() {
+        for (String label : new String[]{null, "", "Search", "Send", "Delete", "确认支付"}) {
+            for (boolean confirmed : new boolean[]{false, true}) for (boolean same : new boolean[]{false, true}) {
+                assertFalse(PhoneActionPolicy.needsConfirmationBeforeDispatch(label, label, false, confirmed, same, true));
+                assertEquals(PhoneActionPolicy.needsConfirmationBeforeDispatch(label, label, false, confirmed, same),
+                    PhoneActionPolicy.needsConfirmationBeforeDispatch(label, label, false, confirmed, same, false));
+            }
+        }
+    }
     @Test public void normalNavigationAndInputNeedNoStepPrompt() {
         for (String label : new String[]{"Search", "搜索", "返回", "相册", "Increment test counter"}) assertFalse(label, PhoneActionPolicy.needsConfirmation("click", label));
         for (String action : new String[]{"launch", "input", "scroll_forward", "scroll_backward", "back"}) assertFalse(PhoneActionPolicy.needsConfirmation(action, ""));

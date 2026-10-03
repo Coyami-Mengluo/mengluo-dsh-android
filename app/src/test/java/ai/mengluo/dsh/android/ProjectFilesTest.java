@@ -83,4 +83,15 @@ public class ProjectFilesTest {
         for (int i = 0; i < 205; i++) files.create(selected, "nested", "file-" + i);
         assertEquals(205, files.list(selected, "nested").size());
     }
+    @Test public void savesPreserveExecutableAndNonExecutablePermissions() throws Exception {
+        Assume.assumeTrue(Files.getFileStore(rootfs.toPath()).supportsFileAttributeView("posix"));
+        File script = files.create(selected, "", "run.sh");
+        for (String mode : new String[]{"rwxr-xr-x", "rw-r-----", "rwx------"}) {
+            var expected = java.nio.file.attribute.PosixFilePermissions.fromString(mode);
+            Files.setPosixFilePermissions(script.toPath(), expected);
+            String previous = files.readText(selected, "run.sh");
+            files.saveText(selected, "run.sh", previous, "#!/bin/sh\necho " + mode);
+            assertEquals(expected, Files.getPosixFilePermissions(script.toPath()));
+        }
+    }
 }

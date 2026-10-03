@@ -23,11 +23,16 @@ final class ArchiveInstaller {
         public void symlink(String source, File target) throws Exception { Os.symlink(source, target.getPath()); }
     };
     static void verify(File file, String expected) throws Exception {
+        verify(file, expected, new OperationCancellation(Runnable::run));
+    }
+    static void verify(File file, String expected, OperationCancellation cancellation) throws Exception {
+        cancellation.check();
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
         try (InputStream input = new FileInputStream(file)) {
             byte[] bytes = new byte[64 * 1024]; int length;
-            while ((length = input.read(bytes)) != -1) digest.update(bytes, 0, length);
+            while ((length = input.read(bytes)) != -1) { cancellation.check(); digest.update(bytes, 0, length); }
         }
+        cancellation.check();
         StringBuilder hex = new StringBuilder();
         for (byte value : digest.digest()) hex.append(String.format(Locale.ROOT, "%02x", value & 255));
         if (!hex.toString().equals(expected)) throw new IOException("运行环境校验失败：" + file.getName());
@@ -35,9 +40,17 @@ final class ArchiveInstaller {
     static void extract(File archive, File root, int stripComponents, Consumer<String> progress) throws Exception {
         extract(archive, root, stripComponents, progress, ANDROID_FILES, MAX_EXTRACTED_BYTES);
     }
+    static void extract(File archive, File root, int stripComponents, Consumer<String> progress, OperationCancellation cancellation) throws Exception {
+        extract(archive, root, stripComponents, progress, ANDROID_FILES, MAX_EXTRACTED_BYTES, cancellation);
+    }
     // JVM tests substitute only chmod/symlink; hard-link entries always use the real copy path.
     static void extract(File archive, File root, int stripComponents, Consumer<String> progress,
                         FileOperations files, long maxBytes) throws Exception {
+        extract(archive, root, stripComponents, progress, files, maxBytes, new OperationCancellation(Runnable::run));
+    }
+    static void extract(File archive, File root, int stripComponents, Consumer<String> progress,
+                        FileOperations files, long maxBytes, OperationCancellation cancellation) throws Exception {
+        cancellation.check();
         if (stripComponents < 0 || maxBytes < 0) throw new IllegalArgumentException("Invalid extraction limits");
         ArrayList<String[]> hardLinks = new ArrayList<>(), symbolicLinks = new ArrayList<>();
         Map<File, Integer> regularFiles = new HashMap<>();
@@ -45,6 +58,7 @@ final class ArchiveInstaller {
         try (TarArchiveInputStream tar = new TarArchiveInputStream(new GZIPInputStream(new FileInputStream(archive)))) {
             TarArchiveEntry entry;
             while ((entry = tar.getNextEntry()) != null) {
+                cancellation.check();
                 String name = entryPath(entry.getName(), stripComponents);
                 if (name.isEmpty()) continue;
                 File target = RuntimePolicy.inside(root, name);
@@ -60,7 +74,7 @@ final class ArchiveInstaller {
                     File parent = target.getParentFile();
                     if (!parent.isDirectory() && !parent.mkdirs()) throw new IOException("无法创建父目录");
                     if (Files.isSymbolicLink(target.toPath())) throw new IOException("拒绝覆盖链接");
-                    try (OutputStream output = new FileOutputStream(target)) { IO.copy(tar, output); }
+                    try (OutputStream output = new FileOutputStream(target)) { copy(tar, output, cancellation); }
                     int mode = entry.getMode() & 0777;
                     files.chmod(target, mode);
                     regularFiles.put(target, mode);
@@ -74,6 +88,7 @@ final class ArchiveInstaller {
         while (!hardLinks.isEmpty()) {
             boolean resolved = false;
             for (Iterator<String[]> iterator = hardLinks.iterator(); iterator.hasNext();) {
+                cancellation.check();
                 String[] link = iterator.next();
                 File source = RuntimePolicy.inside(root, link[1]);
                 Integer mode = regularFiles.get(source);
@@ -82,7 +97,10 @@ final class ArchiveInstaller {
                     throw new IOException("硬链接来源不是普通文件：" + link[1]);
                 File target = newLinkTarget(root, link[0]);
                 total = addSize(total, Files.size(source.toPath()), maxBytes);
-                Files.copy(source.toPath(), target.toPath(), LinkOption.NOFOLLOW_LINKS);
+                try (InputStream input = Files.newInputStream(source.toPath(), LinkOption.NOFOLLOW_LINKS);
+                     OutputStream output = Files.newOutputStream(target.toPath(), java.nio.file.StandardOpenOption.CREATE_NEW)) {
+                    copy(input, output, cancellation);
+                }
                 files.chmod(target, mode);
                 regularFiles.put(target, mode);
                 iterator.remove(); resolved = true;
@@ -90,7 +108,12 @@ final class ArchiveInstaller {
             if (!resolved) throw new IOException("硬链接来源缺失、循环或不是归档中的普通文件：" + hardLinks.get(0)[0]);
         }
         // Deferring symlinks prevents later archive data from being written through them.
-        for (String[] link : symbolicLinks) files.symlink(link[1], newLinkTarget(root, link[0]));
+        for (String[] link : symbolicLinks) { cancellation.check(); files.symlink(link[1], newLinkTarget(root, link[0])); }
+        cancellation.check();
+    }
+    private static void copy(InputStream input, OutputStream output, OperationCancellation cancellation) throws IOException {
+        byte[] bytes = new byte[64 * 1024]; int length;
+        while ((length = input.read(bytes)) != -1) { cancellation.check(); output.write(bytes, 0, length); }
     }
     private static File newLinkTarget(File root, String name) throws IOException {
         File target = RuntimePolicy.inside(root, name);
