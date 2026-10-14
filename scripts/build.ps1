@@ -1,10 +1,21 @@
-param([string[]]$Tasks = @('assembleDebug','testDebugUnitTest','lintDebug'), [ValidateSet('x86_64','arm64-v8a')][string]$Abi = 'x86_64')
+param([string[]]$Tasks = @('assembleDebug','testDebugUnitTest','lintDebug'), [ValidateSet('x86_64','arm64-v8a')][string]$Abi)
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot
+if (!$Abi) {
+    $deviceConfig = Join-Path $projectRoot '.tools/test-device.json'
+    $Abi = if (Test-Path -LiteralPath $deviceConfig) { (Get-Content -LiteralPath $deviceConfig -Raw | ConvertFrom-Json).abi } else { 'x86_64' }
+    if (!$Abi) { throw 'Set abi in .tools/test-device.json or pass -Abi explicitly.' }
+}
 if (!$env:JAVA_HOME) {
+    $localJdk = Get-ChildItem -LiteralPath (Join-Path $projectRoot '.tools/jdk') -Directory -ErrorAction SilentlyContinue |
+        Where-Object { (Test-Path -LiteralPath (Join-Path $_.FullName 'bin/javac.exe')) -and
+            (Test-Path -LiteralPath (Join-Path $_.FullName 'release')) -and
+            (Select-String -LiteralPath (Join-Path $_.FullName 'release') -Pattern '^JAVA_VERSION="21[."]' -Quiet) } |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
     $javaExecutable = Get-Command javac.exe -ErrorAction SilentlyContinue
-    if ($javaExecutable) { $env:JAVA_HOME = Split-Path -Parent (Split-Path -Parent $javaExecutable.Source) }
-    else { throw 'Set JAVA_HOME to a JDK 21 installation before building.' }
+    if ($localJdk) { $env:JAVA_HOME = $localJdk.FullName }
+    elseif ($javaExecutable) { $env:JAVA_HOME = Split-Path -Parent (Split-Path -Parent $javaExecutable.Source) }
+    else { throw 'Set JAVA_HOME to JDK 21 or unpack it under .tools/jdk before building.' }
 }
 $env:ANDROID_HOME = Join-Path $projectRoot '.tools\android-sdk'
 $env:ANDROID_USER_HOME = Join-Path $projectRoot '.tools\android-user'

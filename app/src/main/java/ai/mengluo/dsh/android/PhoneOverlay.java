@@ -107,7 +107,8 @@ final class PhoneOverlay {
     }
     boolean show(boolean controlling, String confirmation) {
         Rect bounds = safeBounds();
-        String next = controlling + ":" + confirmation + ":" + context.getResources().getConfiguration().uiMode + ":" + bounds.width() + "x" + bounds.height();
+        boolean rainbow = control.skipActionConfirmation();
+        String next = controlling + ":" + confirmation + ":" + rainbow + ":" + context.getResources().getConfiguration().uiMode + ":" + bounds.width() + "x" + bounds.height();
         // addView attaches on the next UI traversal; do not tear it down while that is pending.
         if (next.equals(rendering) && view != null) return true;
         int oldY = position == null ? ui.dp(180) : position.y;
@@ -117,7 +118,8 @@ final class PhoneOverlay {
         // Dismissing confirmation immediately restores the edge handle before a pending touch.
         boolean resumeCollapsed = view != null && controlling && active && (collapsed || awaitingConfirmation) && confirmation.isEmpty();
         hide(); active = controlling; rendering = next; collapsed = false; awaitingConfirmation = !confirmation.isEmpty();
-        LinearLayout body = ui.column(controlling ? 10 : 0); body.setElevation(ui.dp(8));
+        LinearLayout body = controlling ? new PhoneOverlayFrame(context, awaitingConfirmation, rainbow) : ui.column(0);
+        body.setElevation(ui.dp(8));
         body.setBackground(ui.rounded(ui.color(R.color.surface), controlling ? 24 : 28)); body.setClipToOutline(true);
         LinearLayout row = new LinearLayout(context); row.setGravity(Gravity.CENTER_VERTICAL);
         icon = new ImageButton(context); icon.setImageResource(R.drawable.menu_icon); icon.setScaleType(ImageView.ScaleType.FIT_CENTER);

@@ -42,9 +42,15 @@ public class DeviceSmokeTest {
         assertTrue(engine.readyUrl.startsWith("http://127.0.0.1:"));
         try {
             await(() -> "true".equals(evaluate(activity,
-                "document.title.includes('Harness') && typeof Promise.withResolvers==='function' && typeof AbortSignal.any==='function' && document.body.innerText.includes('新会话') && document.body.innerText.includes('设置')")), 45);
+                "document.title.includes('Harness') && document.readyState==='complete'"
+                + " && typeof Promise.withResolvers==='function' && typeof AbortSignal.any==='function'"
+                + " && ['新建会话','设置'].every(label => Array.from(document.querySelectorAll('button'))"
+                + ".some(button => button.getAttribute('aria-label')===label && !button.disabled"
+                + " && button.getClientRects().length>0 && getComputedStyle(button).visibility!=='hidden'))")), 45);
         } catch (AssertionError failure) {
-            fail("WebView startup: " + evaluate(activity, "JSON.stringify({title:document.title,ready:document.readyState,promise:typeof Promise.withResolvers,abort:typeof AbortSignal.any,rendered:document.body.innerText.includes('新会话')})") + "\n" + engine.logs());
+            String logs = engine.logs();
+            fail("WebView startup: " + evaluate(activity, "JSON.stringify({title:document.title,ready:document.readyState,promise:typeof Promise.withResolvers,abort:typeof AbortSignal.any,controls:Array.from(document.querySelectorAll('button[aria-label]')).map(button=>({label:button.getAttribute('aria-label'),visible:button.getClientRects().length>0,disabled:button.disabled}))})")
+                + "\n" + logs.substring(Math.max(0, logs.length() - 8000)));
         }
         Thread.sleep(4000);
         assertEquals("Frontend is still reconnecting", "false", evaluate(activity, "document.body.innerText.includes('重新连接中')"));

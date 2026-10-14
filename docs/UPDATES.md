@@ -25,6 +25,10 @@
 
 ## Android 客户端
 
+1.0.0 为首个正式版，旧版测试结束。正式版启用新的长期签名，旧测试版本不能通过覆盖安装或应用内更新迁移；应先导出重要项目和文件、妥善保存配置与聊天记录，再卸载旧版并安装正式版。卸载会清除应用私有数据。后续正式版沿用这份签名，继续执行下述更新校验，不放宽签名检查。
+
+从 1.0.0 起，正式版签名证书的 SHA-256 指纹为 `07bad631fb53b3adb971d14162af2416c10e0f2b27be55b77b82249900310262`。发布前用 `apksigner verify --print-certs` 核对两种架构的 APK 均使用此证书；此指纹是公开校验信息，不是私钥。
+
 固定 GitHub 仓库 Release 中的 `android-update.json` → 根据 APK ABI 选文件 → 下载 → 大小 / SHA-256 / 包名 / 更高 versionCode / versionName / 签名 / ABI 检查 → 原生确认 → 安卓系统安装器。
 
 - 发布源固定为 `Coyami-Mengluo/mengluo-dsh-android`，只允许 HTTPS GitHub Releases 和官方 release asset CDN 重定向。网页下载域名不可达时，回退到同仓库的 GitHub 官方 Release 附件 API；没有第三方 GitHub 代理或跳过证书验证。
@@ -46,8 +50,8 @@
 构建命令示例：
 
 ```powershell
-./scripts/build-release.ps1 -Abi arm64-v8a -SigningConfig <本地签名JSON> -VersionName 0.0.9 -VersionCode 12
-./scripts/build-release.ps1 -Abi x86_64 -SigningConfig <本地签名JSON> -VersionName 0.0.9 -VersionCode 12
+./scripts/build-release.ps1 -Abi arm64-v8a -SigningConfig <本地签名JSON> -VersionName 1.0.0 -VersionCode 14
+./scripts/build-release.ps1 -Abi x86_64 -SigningConfig <本地签名JSON> -VersionName 1.0.0 -VersionCode 14
 ```
 
 签名 JSON 字段：`keystore`（绝对路径）、`storePassword`、`keyAlias`、`keyPassword`。脚本仅通过当前进程环境传给 Gradle，不把密码写进源码。妥善离线备份密钥；丢失或更换签名会破坏覆盖安装和内置更新兼容性。其他贡献者需使用自己的密钥、包名与更新源，不能向原项目用户分发换签名的更新。

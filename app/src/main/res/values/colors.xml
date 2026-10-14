@@ -4,6 +4,13 @@
     <color name="ink">#202637</color>
     <color name="muted">#71798D</color>
     <color name="accent">#4561DC</color>
+    <color name="phone_ring_blue">#5369FF</color>
+    <color name="phone_ring_violet">#B362F5</color>
+    <color name="phone_ring_cyan">#1ACDDD</color>
+    <color name="phone_ring_red">#FF526D</color>
+    <color name="phone_ring_orange">#FF9F43</color>
+    <color name="phone_ring_yellow">#F5D547</color>
+    <color name="phone_ring_green">#47D98B</color>
     <color name="on_accent">#FFFFFF</color>
     <color name="tonal">#EDF0FF</color>
     <color name="outline">#E3E7F1</color>

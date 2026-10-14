@@ -2,8 +2,7 @@ import { spawnSync } from 'node:child_process'
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { root } from './download.mjs'
-const adb = 'C:/Program Files/Netease/MuMu Player 12/nx_main/adb.exe'
-const serial = '127.0.0.1:16384'
+import { adb, serial } from './device-target.mjs'
 const result = spawnSync(adb, ['-s', serial, 'shell', 'dumpsys', 'window'], { encoding: 'utf8', windowsHide: true })
 const focus = result.stdout.split('\n').filter(line => /mCurrentFocus=|mFocusedApp=/u.test(line))
 if (!focus.some(line => line.includes('ai.mengluo.dsh.android/'))) throw new Error('Our test app is not in the foreground; screenshot not taken')
