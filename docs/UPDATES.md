@@ -50,8 +50,8 @@
 构建命令示例：
 
 ```powershell
-./scripts/build-release.ps1 -Abi arm64-v8a -SigningConfig <本地签名JSON> -VersionName 1.0.1 -VersionCode 15
-./scripts/build-release.ps1 -Abi x86_64 -SigningConfig <本地签名JSON> -VersionName 1.0.1 -VersionCode 15
+./scripts/build-release.ps1 -Abi arm64-v8a -SigningConfig <本地签名JSON> -VersionName 1.0.2 -VersionCode 16
+./scripts/build-release.ps1 -Abi x86_64 -SigningConfig <本地签名JSON> -VersionName 1.0.2 -VersionCode 16
 ```
 
 签名 JSON 字段：`keystore`（绝对路径）、`storePassword`、`keyAlias`、`keyPassword`。脚本仅通过当前进程环境传给 Gradle，不把密码写进源码。妥善离线备份密钥；丢失或更换签名会破坏覆盖安装和内置更新兼容性。其他贡献者需使用自己的密钥、包名与更新源，不能向原项目用户分发换签名的更新。

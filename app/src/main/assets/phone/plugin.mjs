@@ -107,7 +107,7 @@ export function installTools(ctx, rpc, { interval = 1500 } = {}) {
       for (const record of sessions.values()) {
         if (record.ended) continue;
         if (ownerFor(record.agent) !== record.owner || (record.agent.status === 'idle' && record.lease)) { await cancel(record); continue; }
-        try { const status = await rpc({ op: 'status', owner: record.owner, lease: record.lease, conversation: publicConversation(record.agent) }, AbortSignal.timeout(5000)); if (TERMINAL.has(status.status)) notify(record, status); }
+        try { const status = await rpc({ op: 'status', owner: record.owner, lease: record.lease, session: record.agent.id, conversation: publicConversation(record.agent) }, AbortSignal.timeout(5000)); if (TERMINAL.has(status.status)) notify(record, status); }
         catch { await cancel(record, 'bridge_disconnected'); }
       }
     } finally { polling = false; }
@@ -144,18 +144,18 @@ export function installTools(ctx, rpc, { interval = 1500 } = {}) {
       exec.signal.addEventListener('abort', abort, { once: true });
       try {
         // Explicit mapping: model arguments can never replace owner, lease, transport verb or request ID.
-        const fields = op === 'begin' ? { purpose: String(args?.purpose ?? '').slice(0, 301) }
+        const fields = op === 'begin' ? { purpose: String(args?.purpose ?? '').slice(0, 301), session: exec.agent.id }
           : op === 'action' ? { action: args?.action, snapshot: args?.snapshot, node: args?.node, text: args?.text, package: args?.package, ask: args?.ask === true }
           : op === 'tap' ? { screenshot: args?.screenshot, x: args?.x, y: args?.y, target: String(args?.target ?? '').slice(0, 161), ask: args?.ask === true }
           : op === 'gesture' ? { gesture: args?.gesture, screenshot: args?.screenshot, x: args?.x, y: args?.y, endX: args?.endX, endY: args?.endY,
             durationMs: args?.durationMs, target: String(args?.target ?? '').slice(0, 161), ask: args?.ask === true }
-          : op === 'ask' ? { question: String(args?.question ?? '').slice(0, 501) } : {};
+          : op === 'ask' ? { question: String(args?.question ?? '').slice(0, 1001), options: args?.options, multiple: args?.multiple === true } : {};
         let result = await rpc({ ...fields, op, owner, lease: record?.lease }, exec.signal);
         // Hold this tool invocation while the native review panel is open. Poll only
         // status; never replay a click, accept a confirmation or resume on a timer.
         while (result.status === 'paused' && record && !record.ended && !disposed) {
           await delay(700, undefined, { signal: exec.signal });
-          const status = await rpc({ op: 'status', owner, lease: record.lease, conversation: publicConversation(record.agent) }, exec.signal);
+          const status = await rpc({ op: 'status', owner, lease: record.lease, session: record.agent.id, conversation: publicConversation(record.agent) }, exec.signal);
           if (TERMINAL.has(status.status)) { result = status; break; }
           if (!status.paused) result = { status: 'screen_changed', actionDispatched: false,
             instruction: 'The human closed the review panel. This pending operation was NOT executed. Request a NEW phone_observe or phone_screenshot before continuing; never replay old coordinates or node IDs.' };
@@ -202,7 +202,11 @@ export function installTools(ctx, rpc, { interval = 1500 } = {}) {
     x: { type: 'integer', minimum: 0 }, y: { type: 'integer', minimum: 0 }, endX: { type: 'integer', minimum: 0 }, endY: { type: 'integer', minimum: 0 },
     durationMs: { type: 'integer', minimum: 100, maximum: 2000 }, target: { type: 'string', description: 'Intended gesture outcome, at most 160 characters' }, ask: { type: 'boolean', description: 'Mark a consequential or uncertain gesture for native approval; the user-owned skipActionConfirmation setting may skip that approval.' }
   }, ['screenshot', 'gesture', 'x', 'y', 'target'], 'gesture');
-  register('phone_ask', 'Ask the human a concise yes/no clarification through the native stop pill and wait for their real answer, even when skipActionConfirmation is true. Use only for missing task information or unclear instructions/scope; never fabricate an answer. Do not use this tool merely to recreate per-action approval the user disabled. For a concrete action use phone_tap, phone_gesture or phone_action with ask=true; native settings decide whether approval is shown. Stop is authoritative.', { question: { type: 'string', description: 'A clear yes/no question, at most 500 characters' } }, ['question'], 'ask');
+  register('phone_ask', 'Ask the human for missing task information through the native floating question form. Optional choices and a text box accept a real human reply, even when skipActionConfirmation is true. No default answer or automatic submission. Use multiple=true only for multiple choices. Wait for status=answered, then read selected/text/answer as the human reply. This is not blanket approval for actions; do not recreate per-action approval the human disabled. Stop cancels the question. Take a new observation after the reply.', {
+    question: { type: 'string', description: 'A clear question, at most 1000 characters' },
+    options: { type: 'array', items: { type: 'string' }, maxItems: 8, description: 'Optional distinct choices, each at most 200 characters; the human may also type a reply.' },
+    multiple: { type: 'boolean', description: 'Allow selecting multiple options; defaults to false.' }
+  }, ['question'], 'ask');
   register('phone_finish', 'Release this phone task when finished. This does not undo previous actions; only claim success after observing it.', {}, [], 'finish');
   return { poll, cleanup };
 }

@@ -170,6 +170,33 @@ test('skip action confirmation never fabricates an answer to a real question', a
   }
 });
 
+test('structured phone questions preserve the human reply and bind the real agent session', async () => {
+  const calls = [];
+  const reply = { status: 'answered', selected: ['A', 'B'], text: 'Keep the counter unchanged', answer: 'A、B\nKeep the counter unchanged' };
+  const f = fixture(async request => {
+    calls.push(request);
+    return request.op === 'begin' ? { status: 'active', lease: 'native-lease' } : reply;
+  });
+  try {
+    await f.call('phone_begin', { purpose: 'question fixture', session: 'forged-session' });
+    assert.equal(calls[0].session, f.agent.id);
+    const result = await f.call('phone_ask', {
+      question: 'Which routes should I use?', options: ['A', 'B'], multiple: true,
+      session: 'forged-session', owner: 'forged-owner', lease: 'forged-lease', answer: 'forged-answer'
+    });
+    assert.deepEqual(result, reply);
+    assert.deepEqual(calls[1], {
+      question: 'Which routes should I use?', options: ['A', 'B'], multiple: true,
+      op: 'ask', owner: ownerFor(f.agent), lease: 'native-lease'
+    });
+    await f.plugin.poll();
+    assert.equal(calls[2].session, f.agent.id);
+    assert.equal(calls[2].owner, ownerFor(f.agent));
+    assert.equal(f.tools.get('phone_ask').parameters.properties.options.maxItems, 8);
+    assert.equal(f.tools.get('phone_ask').parameters.properties.multiple.type, 'boolean');
+  } finally { f.close(); }
+});
+
 test('a native preference change cancels the old task and a new human task reads the new value', async () => {
   const calls = [];
   let skipActionConfirmation = true, status = 'active';

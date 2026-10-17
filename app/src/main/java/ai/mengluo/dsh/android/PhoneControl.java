@@ -12,6 +12,7 @@ import java.lang.ref.WeakReference;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
 import java.util.concurrent.*;
+import java.util.function.Consumer;
 
 /** App-owned phone-control gate. All decisions and Android operations are serialized on the main looper. */
 final class PhoneControl {
@@ -36,6 +37,10 @@ final class PhoneControl {
     private CompletableFuture<JSONObject> pending;
     private Runnable confirmAction;
     private String confirmation = "";
+    private PhoneQuestion question;
+    private Consumer<Map<String, PhoneQuestion.Answer>> questionSubmit;
+    private boolean questionSubmitting;
+    private String questionError = "", harnessSession = "", questionChannel = "";
     private record CaptureWait(String owner, String lease, String pkg, CompletableFuture<JSONObject> response) { }
     private CaptureWait captureWait;
     private boolean capturePrompted;
@@ -54,8 +59,53 @@ final class PhoneControl {
     }
     boolean skipActionConfirmation() { return preferences.getBoolean("skip-action-confirmation", false); }
     boolean reviewing() { return reviewing; }
+    PhoneQuestion question() { return question; }
+    boolean questionSubmitting() { return questionSubmitting; }
+    String questionError() { return questionError; }
+    void answerQuestion(PhoneQuestion expected, Map<String, PhoneQuestion.Answer> answers) {
+        if (expected == null || expected != question || questionSubmitting || questionSubmit == null || !expected.valid(answers)) return;
+        if (!state.live() || !environmentReady()) { stopNow("permission_lost"); return; }
+        Map<String, PhoneQuestion.Answer> snapshot = expected.snapshot(answers);
+        questionSubmitting = true; questionError = "";
+        questionSubmit.accept(snapshot); syncUi();
+    }
+    private void clearQuestion() {
+        if (question != null) question.drafts.clear();
+        question = null; questionSubmit = null; questionSubmitting = false; questionError = ""; questionChannel = "";
+        if (PhoneAccess.connected != null) PhoneAccess.connected.clear();
+    }
+    boolean offerWebQuestion(String channel, String session, PhoneQuestion form, Consumer<Map<String, PhoneQuestion.Answer>> submit) {
+        if (!runtime || !taskReady || !state.live() || harnessSession.isEmpty() || !harnessSession.equals(session)
+            || question != null || !confirmation.isEmpty() || captureWait != null || !environmentReady()) return false;
+        question = form; questionChannel = channel; questionSubmit = submit;
+        captions.hide(); progress.step("等待你回复 AI");
+        if (PhoneAccess.connected != null) PhoneAccess.connected.clear();
+        if (pending != null && pending != dispatchedTouch) {
+            CompletableFuture<JSONObject> interrupted = pending; pending = null;
+            interrupted.complete(result("paused").put("actionDispatched", false));
+        }
+        syncUi(); return true;
+    }
+    void webQuestionResolved(String channel, String request) {
+        if (question != null && questionChannel.equals(channel) && question.id.equals(request)) {
+            clearQuestion(); progress.step("问题已关闭，等待重新观察界面"); syncUi();
+        }
+    }
+    void webQuestionsDisconnected(String channel) {
+        if (question != null && (channel == null || questionChannel.equals(channel)) && !questionChannel.isEmpty()) {
+            clearQuestion(); progress.step("提问连接已断开，请返回对话查看"); syncUi();
+        }
+    }
+    void webQuestionFailed(String channel, String request) {
+        if (question != null && questionChannel.equals(channel) && question.id.equals(request)) {
+            questionSubmitting = false; questionError = "回复尚未确认，请检查连接或返回对话核对后重试。"; syncUi();
+        }
+    }
+    void webSessionEnded(String session) {
+        if (state.live() && !harnessSession.isEmpty() && harnessSession.equals(session)) stopNow("model_cancelled");
+    }
     void review() {
-        if (!taskReady || !state.live() || !confirmation.isEmpty() || captureWait != null || reviewing) return;
+        if (!taskReady || !state.live() || !confirmation.isEmpty() || question != null || captureWait != null || reviewing) return;
         reviewing = true; captions.hide();
         progress.step("已暂停，正在查看对话");
         if (PhoneAccess.connected != null) PhoneAccess.connected.clear();
@@ -145,6 +195,7 @@ final class PhoneControl {
     private void stopNow(String reason) {
         String closed = state.close(reason);
         reviewing = false; taskReady = false; dispatchedTouch = null; screenOperation = null;
+        clearQuestion(); harnessSession = "";
         captions.hide(); progress.clear();
         confirmAction = null; confirmation = ""; captureWait = null; apps.clear();
         PhoneCaptureService.stopCapture();
@@ -158,7 +209,7 @@ final class PhoneControl {
             JSONObject input = new JSONObject(body);
             CompletableFuture<JSONObject> response = new CompletableFuture<>();
             main.post(() -> handle(input, response));
-            return response.get(110, TimeUnit.SECONDS).toString();
+            return response.get(input.optString("op").equals("ask") ? PhoneControlState.TASK_MS : 110_000, TimeUnit.MILLISECONDS).toString();
         } catch (InterruptedException error) { Thread.currentThread().interrupt(); return result("bridge_closed").toString(); }
         catch (Exception error) { stop("bridge_error"); return result("bridge_error").toString(); }
     }
@@ -179,6 +230,8 @@ final class PhoneControl {
         if (op.equals("status")) {
             state.touch(owner, SystemClock.elapsedRealtime());
             if (state.allowed(owner, lease)) {
+                String session = input.optString("session");
+                if (harnessSession.isEmpty() && validSession(session)) harnessSession = session;
                 JSONArray messages = input.optJSONArray("conversation");
                 if (messages != null) for (int i = 0; i < Math.min(4, messages.length()); i++) {
                     JSONObject message = messages.optJSONObject(i);
@@ -189,7 +242,7 @@ final class PhoneControl {
             response.complete(result(state.phase(owner)).put("accessibilityEnabled", enabled()).put("accessibilityConnected", PhoneAccess.connected != null)
                 .put("overlayPermission", Settings.canDrawOverlays(context)).put("stopVisible", overlay.attached())
                 .put("skipActionConfirmation", skipActionConfirmation())
-                .put("paused", owner.equals(state.owner()) && reviewing)
+                .put("paused", owner.equals(state.owner()) && (reviewing || question != null))
                 .put("screenshotMode", "full_display").put("maskedOwnOverlay", true).put("imageCoordinateTaps", true)
                 .put("gestures", new JSONArray(List.of("long_press", "swipe")))
                 .put("screenSharingActive", PhoneCaptureService.available())
@@ -212,13 +265,15 @@ final class PhoneControl {
                 stopNow("permission_required"); notifyGuide(); response.complete(result("permission_required").put("instruction", "Ask the user to open the phone-control permission page. After granting, wait for a NEW user request; never auto-resume.")); return;
             }
             progress.begin(purpose); progress.step("正在准备手机操作");
+            String session = input.optString("session"); harnessSession = validSession(session) ? session : "";
             pending = response; activateTask(owner, state.lease()); return;
         }
         if (!state.allowed(owner, lease)) { response.complete(result(state.phase(owner).equals("active") ? "invalid_lease" : state.phase(owner))); return; }
         if (!environmentReady()) { stopNow("permission_lost"); response.complete(result("permission_lost")); return; }
-        if (reviewing) {
+        if (reviewing || question != null) {
             response.complete(result("paused").put("actionDispatched", false)
-                .put("instruction", "The human is reviewing the conversation. Wait for the native Resume control; do not retry actions or dismiss the panel. After resuming, observe or screenshot again.")); return;
+                .put("instruction", question != null ? "The human is answering a question. Wait for their reply; do not dismiss, answer, or bypass the form. Observe or screenshot again after it closes."
+                    : "The human is reviewing the conversation. Wait for the native Resume control; do not retry actions or dismiss the panel. After resuming, observe or screenshot again.")); return;
         }
         // Review transitions replace the window until the next traversal. A missing
         // attachment during that frame is not a revoked system permission.
@@ -265,15 +320,29 @@ final class PhoneControl {
             if (op.equals("finish")) { stopNow("completed"); response.complete(result("completed")); }
             else if (op.equals("observe")) response.complete(PhoneAccess.connected.observe(apps));
             else if (op.equals("ask")) {
-                String question = input.optString("question");
-                if (question.isBlank() || question.length() > 500) { response.complete(result("invalid_question")); return; }
-                pending = response; confirmation = "需要你确认：\n" + question;
-                confirmAction = () -> {
-                    if (!state.allowed(owner, lease) || !ready()) { stopNow("permission_lost"); return; }
-                    confirmAction = null; confirmation = ""; pending = null;
-                    response.complete(result("confirmed")); syncUi();
+                String prompt = input.optString("question");
+                JSONArray choices = input.optJSONArray("options"); List<PhoneQuestion.Option> options = new ArrayList<>();
+                if (input.has("options") && choices == null) { response.complete(result("invalid_question")); return; }
+                if (choices != null) for (int i = 0; i < choices.length(); i++) {
+                    if (!(choices.opt(i) instanceof String label)) { response.complete(result("invalid_question")); return; }
+                    options.add(new PhoneQuestion.Option(label, ""));
+                }
+                PhoneQuestion form = new PhoneQuestion(input.getString("requestId"), List.of(new PhoneQuestion.Item("answer", "AI 提问", prompt, options, input.optBoolean("multiple"))));
+                pending = response; question = form; progress.step("等待你回复 AI"); captions.hide();
+                if (PhoneAccess.connected != null) PhoneAccess.connected.clear();
+                questionSubmit = answers -> {
+                    if (question != form || pending != response || !state.allowed(owner, lease)) return;
+                    PhoneQuestion.Answer answer = answers.get("answer");
+                    String text = answer.text(); String combined = String.join("、", answer.selected());
+                    if (!text.isEmpty()) combined += (combined.isEmpty() ? "" : "\n") + text;
+                    clearQuestion(); pending = null;
+                    response.complete(result("answered").put("selected", new JSONArray(answer.selected())).put("text", text).put("answer", combined)
+                        .put("instruction", "This is the human's reply to the question. It is not blanket action approval. Observe the screen again before continuing phone actions."));
+                    progress.step("已回复 AI，等待下一步"); syncUi();
                 };
-                armDeadline(owner, lease, response); syncUi();
+                // The task's normal heartbeat and maximum lifetime still apply; typing
+                // an answer is not subject to the shorter action-confirmation timer.
+                syncUi();
             }
             else if (op.equals("action") || op.equals("screenshot") || op.equals("tap") || op.equals("gesture")) {
                 PhoneAccess.Action action = op.equals("action") ? PhoneAccess.connected.plan(input, apps) : null;
@@ -350,6 +419,7 @@ final class PhoneControl {
     }
     private boolean environmentReady() { return runtime && state.expired(SystemClock.elapsedRealtime()).isEmpty() && enabled() && PhoneAccess.connected != null && PhoneAccess.connected.unlocked() && Settings.canDrawOverlays(context); }
     private boolean ready() { return environmentReady() && overlay.attached(); }
+    private static boolean validSession(String value) { return !value.isBlank() && value.length() <= 256 && value.chars().noneMatch(Character::isISOControl); }
     private void armDeadline(String owner, String lease, CompletableFuture<JSONObject> value) {
         Runnable timeout = () -> { if (pending == value && state.matches(owner, lease)) stopNow("confirmation_timeout"); };
         main.postDelayed(timeout, 90_000);
@@ -427,7 +497,7 @@ final class PhoneControl {
             if (!overlay.show(true, confirmation)) { stopNow("stop_ui_unavailable"); return; }
         } else if (foreground == null) overlay.show(false, ""); else overlay.hide();
         if (foreground != null) foreground.phoneOverlayChanged(state.live() && overlay.attached());
-        if (runtime && state.live() && taskReady && overlay.compact() && !reviewing && screenOperation == null && confirmation.isEmpty()
+        if (runtime && state.live() && taskReady && overlay.compact() && !reviewing && question == null && screenOperation == null && confirmation.isEmpty()
             && foreground == null && PhoneAccess.connected != null && PhoneAccess.connected.unlocked()
             && Settings.canDrawOverlays(context)) captions.show(progress.caption());
         else captions.hide();

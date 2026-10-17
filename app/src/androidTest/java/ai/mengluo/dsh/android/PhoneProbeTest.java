@@ -35,7 +35,10 @@ public class PhoneProbeTest {
     }
     @After public void cleanup() { control.runtimeStopped(); worker.shutdownNow(); instrumentation.waitForIdleSync(); }
     JSONObject rpc(JSONObject input) throws Exception {
-        input.put("owner", owner).put("requestId", UUID.randomUUID().toString());
+        return rpc(input, owner);
+    }
+    JSONObject rpc(JSONObject input, String requestOwner) throws Exception {
+        input.put("owner", requestOwner).put("requestId", UUID.randomUUID().toString());
         HttpURLConnection connection = (HttpURLConnection)new URL(endpoint).openConnection(Proxy.NO_PROXY);
         connection.setRequestMethod("POST"); connection.setDoOutput(true); connection.setConnectTimeout(2000); connection.setReadTimeout(100000);
         connection.setRequestProperty("Content-Type", "application/json"); connection.setRequestProperty("Authorization", "Bearer " + token);
@@ -1203,6 +1206,297 @@ public class PhoneProbeTest {
             assertEquals("Count: 1", revisionFixtureCommand("count").getString("count"));
         } finally {
             instrumentation.runOnMainSync(() -> { control.stop("user_cancelled"); control.skipActionConfirmation(originalSkip); });
+        }
+    }
+    @Test public void localQuestionsAcceptOptionsAndTextOnlyAfterHumanSubmission() throws Exception {
+        Assume.assumeTrue("Requires isolated-test permissions", "true".equals(InstrumentationRegistry.getArguments().getString("allowPhoneFixture")));
+        long deadline = android.os.SystemClock.elapsedRealtime() + 120000;
+        while ((!control.enabled() || PhoneAccess.connected == null || !Settings.canDrawOverlays(context))
+            && android.os.SystemClock.elapsedRealtime() < deadline) Thread.sleep(200);
+        assertTrue(Settings.canDrawOverlays(context)); assertTrue(control.enabled()); assertNotNull(PhoneAccess.connected);
+        android.app.UiAutomation automation = instrumentation.getUiAutomation(android.app.UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES);
+        android.accessibilityservice.AccessibilityServiceInfo info = automation.getServiceInfo();
+        int originalFlags = info.flags;
+        info.flags |= android.accessibilityservice.AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS;
+        automation.setServiceInfo(info);
+        try (InputStream input = new android.os.ParcelFileDescriptor.AutoCloseInputStream(automation.executeShellCommand(
+            "am start -W -n ai.mengluo.dsh.android.phoneprobe.test/ai.mengluo.dsh.android.PhoneFixtureActivity --ez revisionFixture true"))) {
+            assertTrue(new String(IO.bytes(input), StandardCharsets.UTF_8).contains("Status: ok"));
+        }
+        boolean originalSkip = control.skipActionConfirmation();
+        instrumentation.runOnMainSync(() -> control.skipActionConfirmation(true));
+        try {
+            JSONObject begun = rpc(new JSONObject().put("op", "begin").put("purpose", "验证 AI 原生提问、选项和输入回复"));
+            assertEquals(begun.toString(), "active", begun.getString("status")); String lease = begun.getString("lease");
+            Future<JSONObject> single = worker.submit(() -> rpc(new JSONObject().put("op", "ask").put("lease", lease)
+                .put("question", "请选择测试路线，或输入其他路线").put("options", new JSONArray(List.of("A", "B"))).put("multiple", false)));
+            PhoneQuestion first = awaitFixtureQuestion(single);
+            instrumentation.runOnMainSync(() -> {
+                assertFalse(((Button)questionFixtureView("phone-question-submit")).isEnabled());
+                questionFixtureView("phone-question-submit").performClick();
+                control.answerQuestion(first, Map.of("answer", new PhoneQuestion.Answer(List.of(), " \n ")));
+                WindowManager.LayoutParams window = (WindowManager.LayoutParams)((View)overlayFixtureValue(overlay(), "view")).getLayoutParams();
+                assertEquals("The question must allow keyboard focus", 0, window.flags & WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE);
+            });
+            Thread.sleep(400); assertFalse("The skip-confirmation preference must never answer a question", single.isDone());
+            assertTrue(rpc(new JSONObject().put("op", "status").put("lease", lease)).getBoolean("paused"));
+            assertEquals("paused", rpc(new JSONObject().put("op", "action").put("lease", lease).put("action", "back")).getString("status"));
+            instrumentation.runOnMainSync(() -> {
+                CompoundButton a = (CompoundButton)questionFixtureView("phone-question-option-answer-0");
+                CompoundButton b = (CompoundButton)questionFixtureView("phone-question-option-answer-1");
+                a.performClick(); assertTrue(a.isChecked());
+                b.performClick(); assertFalse(a.isChecked()); assertTrue(b.isChecked());
+                assertEquals(List.of("B"), first.drafts.get("answer").selected());
+            });
+            tapQuestionFixtureInput();
+            android.graphics.Rect keyboard = awaitFixtureKeyboard(automation);
+            instrumentation.runOnMainSync(() -> {
+                assertTrue(((EditText)questionFixtureView("phone-question-input-answer")).hasFocus());
+                assertQuestionControlsAboveFixtureKeyboard(keyboard);
+            });
+            // The real IME is already visible and this editor owns focus. Commit as an
+            // IME would, avoiding keyboard-layout/composition differences on this ROM.
+            instrumentation.runOnMainSync(() -> {
+                EditText editor = (EditText)questionFixtureView("phone-question-input-answer");
+                android.view.inputmethod.InputConnection input = editor.onCreateInputConnection(new android.view.inputmethod.EditorInfo());
+                assertNotNull(input); assertTrue(input.commitText("Fixture custom reply", 1));
+            });
+            instrumentation.waitForIdleSync();
+            instrumentation.runOnMainSync(() -> {
+                assertEquals("Fixture custom reply", ((EditText)questionFixtureView("phone-question-input-answer")).getText().toString());
+                assertFalse(((CompoundButton)questionFixtureView("phone-question-option-answer-1")).isChecked());
+                assertEquals(List.of(), first.drafts.get("answer").selected());
+                assertTrue(((Button)questionFixtureView("phone-question-submit")).isEnabled());
+            });
+            Thread.sleep(1200);
+            instrumentation.runOnMainSync(() -> {
+                assertSame("Watchdog refresh must preserve the form and draft", first, control.question());
+                assertEquals("Fixture custom reply", first.drafts.get("answer").text());
+            });
+            // IMEs may replace a temporary toolbar with their full keyboard after
+            // composition starts. Re-read the settled window before the real Send tap.
+            android.graphics.Rect finalKeyboard = awaitFixtureKeyboard(automation);
+            instrumentation.runOnMainSync(() -> assertQuestionControlsAboveFixtureKeyboard(finalKeyboard));
+            assertFalse("Typing must not submit before the human clicks Send", single.isDone());
+            instrumentation.runOnMainSync(() -> {
+                assertNotNull(control.question());
+                assertTrue("Only the isolated fixture or its own focusable question may be foreground",
+                    Set.of("ai.mengluo.dsh.android.phoneprobe.test", context.getPackageName()).contains(PhoneAccess.connected.foreground()));
+            });
+            android.graphics.Bitmap questionImage = automation.takeScreenshot(); assertNotNull(questionImage);
+            try (OutputStream output = new FileOutputStream(new File(context.getExternalFilesDir(null), "phone-question-keyboard.png"))) {
+                assertTrue(questionImage.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, output));
+            } finally { questionImage.recycle(); }
+            tapQuestionFixtureView("phone-question-submit");
+            JSONObject custom = single.get(5, TimeUnit.SECONDS);
+            assertEquals(custom.toString(), "answered", custom.getString("status")); assertEquals(0, custom.getJSONArray("selected").length());
+            assertEquals("Fixture custom reply", custom.getString("text")); assertEquals(custom.getString("text"), custom.getString("answer"));
+            instrumentation.runOnMainSync(() -> { assertNull(control.question()); assertTrue(first.drafts.isEmpty()); });
+
+            Future<JSONObject> plain = worker.submit(() -> rpc(new JSONObject().put("op", "ask").put("lease", lease).put("question", "请输入测试说明")));
+            awaitFixtureQuestion(plain);
+            instrumentation.runOnMainSync(() -> {
+                assertNull(((View)overlayFixtureValue(overlay(), "view")).findViewWithTag("phone-question-option-answer-0"));
+                ((EditText)questionFixtureView("phone-question-input-answer")).setText("  Plain fixture reply  ");
+                assertTrue(questionFixtureView("phone-question-submit").performClick());
+            });
+            JSONObject plainReply = plain.get(5, TimeUnit.SECONDS);
+            assertEquals("answered", plainReply.getString("status")); assertEquals("Plain fixture reply", plainReply.getString("answer"));
+
+            rpc(new JSONObject().put("op", "status").put("lease", lease));
+            Future<JSONObject> multiple = worker.submit(() -> rpc(new JSONObject().put("op", "ask").put("lease", lease)
+                .put("question", "选择多个测试项并补充说明").put("options", new JSONArray(List.of("A", "B"))).put("multiple", true)));
+            awaitFixtureQuestion(multiple);
+            instrumentation.runOnMainSync(() -> {
+                questionFixtureView("phone-question-option-answer-0").performClick();
+                questionFixtureView("phone-question-option-answer-1").performClick();
+                ((EditText)questionFixtureView("phone-question-input-answer")).setText("  Extra fixture detail  ");
+                assertTrue(((CompoundButton)questionFixtureView("phone-question-option-answer-0")).isChecked());
+                assertTrue(((CompoundButton)questionFixtureView("phone-question-option-answer-1")).isChecked());
+                assertTrue(questionFixtureView("phone-question-submit").performClick());
+            });
+            JSONObject combined = multiple.get(5, TimeUnit.SECONDS);
+            assertEquals(combined.toString(), "answered", combined.getString("status"));
+            assertEquals("[\"A\",\"B\"]", combined.getJSONArray("selected").toString());
+            assertEquals("Extra fixture detail", combined.getString("text")); assertEquals("A、B\nExtra fixture detail", combined.getString("answer"));
+
+            Future<JSONObject> stopping = worker.submit(() -> rpc(new JSONObject().put("op", "ask").put("lease", lease).put("question", "停止后不能提交此草稿")));
+            PhoneQuestion stoppedQuestion = awaitFixtureQuestion(stopping);
+            instrumentation.runOnMainSync(() -> ((EditText)questionFixtureView("phone-question-input-answer")).setText("Do not deliver after stop"));
+            clickOverlayButton("停止");
+            JSONObject stopped = stopping.get(5, TimeUnit.SECONDS);
+            assertEquals(stopped.toString(), "user_cancelled", stopped.getString("status")); assertFalse(stopped.has("answer"));
+            instrumentation.runOnMainSync(() -> {
+                control.answerQuestion(stoppedQuestion, Map.of("answer", new PhoneQuestion.Answer(List.of(), "Late answer")));
+                assertNull(control.question()); assertTrue(stoppedQuestion.drafts.isEmpty()); assertFalse(control.state.live());
+            });
+            String nextOwner = "b".repeat(64);
+            JSONObject next = rpc(new JSONObject().put("op", "begin").put("purpose", "验证取消提问"), nextOwner);
+            assertEquals(next.toString(), "active", next.getString("status")); String nextLease = next.getString("lease");
+            Future<JSONObject> cancelling = worker.submit(() -> rpc(new JSONObject().put("op", "ask").put("lease", nextLease).put("question", "取消后不能提交此草稿"), nextOwner));
+            PhoneQuestion cancelledQuestion = awaitFixtureQuestion(cancelling);
+            instrumentation.runOnMainSync(() -> ((EditText)questionFixtureView("phone-question-input-answer")).setText("Do not deliver after cancel"));
+            assertEquals("model_cancelled", rpc(new JSONObject().put("op", "cancel").put("lease", nextLease), nextOwner).getString("status"));
+            JSONObject cancelled = cancelling.get(5, TimeUnit.SECONDS);
+            assertEquals(cancelled.toString(), "model_cancelled", cancelled.getString("status")); assertFalse(cancelled.has("answer"));
+            instrumentation.runOnMainSync(() -> {
+                control.answerQuestion(cancelledQuestion, Map.of("answer", new PhoneQuestion.Answer(List.of(), "Late answer")));
+                assertNull(control.question()); assertTrue(cancelledQuestion.drafts.isEmpty()); assertFalse(control.state.live());
+            });
+            assertEquals("Questions must never touch the underlying fixture", "Count: 0", revisionFixtureCommand("count").getString("count"));
+        } finally {
+            instrumentation.runOnMainSync(() -> { control.stop("user_cancelled"); control.skipActionConfirmation(originalSkip); });
+            info.flags = originalFlags; automation.setServiceInfo(info);
+        }
+    }
+    @Test public void mirroredQuestionsUseActiveSessionAndWaitForAcknowledgement() throws Exception {
+        Assume.assumeTrue("Requires isolated-test permissions", "true".equals(InstrumentationRegistry.getArguments().getString("allowPhoneFixture")));
+        long deadline = android.os.SystemClock.elapsedRealtime() + 120000;
+        while ((!control.enabled() || PhoneAccess.connected == null || !Settings.canDrawOverlays(context))
+            && android.os.SystemClock.elapsedRealtime() < deadline) Thread.sleep(200);
+        assertTrue(Settings.canDrawOverlays(context)); assertTrue(control.enabled()); assertNotNull(PhoneAccess.connected);
+        android.app.UiAutomation automation = instrumentation.getUiAutomation(android.app.UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES);
+        try (InputStream input = new android.os.ParcelFileDescriptor.AutoCloseInputStream(automation.executeShellCommand(
+            "am start -W -n ai.mengluo.dsh.android.phoneprobe.test/ai.mengluo.dsh.android.PhoneFixtureActivity --ez revisionFixture true"))) {
+            assertTrue(new String(IO.bytes(input), StandardCharsets.UTF_8).contains("Status: ok"));
+        }
+        java.util.concurrent.atomic.AtomicInteger submissions = new java.util.concurrent.atomic.AtomicInteger();
+        java.util.concurrent.atomic.AtomicReference<Map<String, PhoneQuestion.Answer>> submitted = new java.util.concurrent.atomic.AtomicReference<>();
+        String session = "question-fixture-session", channel = "fixture-channel";
+        List<PhoneQuestion.Option> options = List.of(new PhoneQuestion.Option("A", "First test route"), new PhoneQuestion.Option("B", "Second test route"));
+        PhoneQuestion form = new PhoneQuestion("official-question", List.of(
+            new PhoneQuestion.Item("route", "Route", "Which route should the fixture use?", options, false),
+            new PhoneQuestion.Item("details", "Details", "Describe the expected fixture result", List.of(), false)));
+        PhoneQuestion interrupted = new PhoneQuestion("disconnected-question", List.of(new PhoneQuestion.Item("answer", "Details", "This draft must be removed on disconnect", List.of(), false)));
+        try {
+            JSONObject begun = rpc(new JSONObject().put("op", "begin").put("purpose", "验证当前会话的官方 AI 提问镜像").put("session", session));
+            assertEquals(begun.toString(), "active", begun.getString("status")); String lease = begun.getString("lease");
+            instrumentation.runOnMainSync(() -> {
+                assertFalse("A different session must never put its question over this task", control.offerWebQuestion(channel, "other-session", form, ignored -> fail("Wrong session submitted")));
+                assertNull(control.question());
+                assertTrue(control.offerWebQuestion(channel, session, form, answers -> { submissions.incrementAndGet(); submitted.set(answers); }));
+                assertFalse("An existing form must not be replaced", control.offerWebQuestion(channel, session, interrupted, ignored -> fail("Replacement submitted")));
+            });
+            awaitFixtureQuestion(null);
+            assertTrue(rpc(new JSONObject().put("op", "status").put("lease", lease)).getBoolean("paused"));
+            instrumentation.runOnMainSync(() -> {
+                assertFalse(((Button)questionFixtureView("phone-question-submit")).isEnabled());
+                questionFixtureView("phone-question-option-route-1").performClick();
+                assertTrue(((CompoundButton)questionFixtureView("phone-question-option-route-1")).isChecked());
+                assertFalse("Every item needs a reply", ((Button)questionFixtureView("phone-question-submit")).isEnabled());
+                ((EditText)questionFixtureView("phone-question-input-details")).setText("  Keep the counter unchanged  ");
+                assertTrue(questionFixtureView("phone-question-submit").performClick());
+                assertEquals(1, submissions.get()); assertTrue(control.questionSubmitting());
+                assertSame("Sending must keep the form until its server acknowledgement", form, control.question());
+                assertFalse(((Button)questionFixtureView("phone-question-submit")).isEnabled());
+                assertEquals(List.of("B"), submitted.get().get("route").selected());
+                assertEquals("Keep the counter unchanged", submitted.get().get("details").text());
+                questionFixtureView("phone-question-submit").performClick();
+                control.answerQuestion(form, submitted.get());
+                assertEquals("Repeated clicks or callbacks must not send again", 1, submissions.get());
+                control.webQuestionResolved("other-channel", form.id); assertSame(form, control.question());
+                control.webQuestionResolved(channel, "other-request"); assertSame(form, control.question());
+                control.webQuestionResolved(channel, form.id);
+                assertNull(control.question()); assertFalse(control.questionSubmitting()); assertTrue(form.drafts.isEmpty());
+                control.answerQuestion(form, submitted.get()); assertEquals(1, submissions.get());
+                assertTrue(control.offerWebQuestion(channel, session, interrupted, ignored -> submissions.incrementAndGet()));
+            });
+            awaitFixtureQuestion(null);
+            instrumentation.runOnMainSync(() -> {
+                ((EditText)questionFixtureView("phone-question-input-answer")).setText("Never send this disconnected draft");
+                control.webQuestionsDisconnected("other-channel"); assertSame(interrupted, control.question());
+                control.webQuestionsDisconnected(channel); assertNull(control.question()); assertTrue(interrupted.drafts.isEmpty());
+                control.answerQuestion(interrupted, Map.of("answer", new PhoneQuestion.Answer(List.of(), "Late disconnected answer")));
+                assertEquals(1, submissions.get()); assertTrue(control.state.live());
+                control.stop("user_cancelled");
+                assertFalse("A stopped task must never display a late question", control.offerWebQuestion(channel, session, form, ignored -> submissions.incrementAndGet()));
+                assertNull(control.question()); assertEquals(1, submissions.get());
+            });
+            assertEquals("Count: 0", revisionFixtureCommand("count").getString("count"));
+        } finally { instrumentation.runOnMainSync(() -> control.stop("user_cancelled")); }
+    }
+    private PhoneQuestion awaitFixtureQuestion(Future<JSONObject> response) throws Exception {
+        long deadline = android.os.SystemClock.elapsedRealtime() + 6000;
+        while (android.os.SystemClock.elapsedRealtime() < deadline) {
+            if (response != null && response.isDone()) fail("Question completed before a human answer: " + response.get());
+            PhoneQuestion[] question = new PhoneQuestion[1];
+            instrumentation.runOnMainSync(() -> {
+                View view = (View)overlayFixtureValue(overlay(), "view");
+                if (control.question() != null && overlay().attached() && view != null && view.findViewWithTag("phone-question-submit") != null) question[0] = control.question();
+            });
+            if (question[0] != null) { instrumentation.waitForIdleSync(); return question[0]; }
+            Thread.sleep(100);
+        }
+        throw new AssertionError("Question UI did not attach");
+    }
+    private View questionFixtureView(String tag) {
+        View root = (View)overlayFixtureValue(overlay(), "view"); assertNotNull("Question window", root);
+        View found = root.findViewWithTag(tag); assertNotNull(tag, found); return found;
+    }
+    private void tapQuestionFixtureInput() throws Exception {
+        instrumentation.runOnMainSync(() -> {
+            View input = questionFixtureView("phone-question-input-answer");
+            input.requestRectangleOnScreen(new android.graphics.Rect(0, 0, input.getWidth(), input.getHeight()), true);
+        });
+        instrumentation.waitForIdleSync(); tapQuestionFixtureView("phone-question-input-answer");
+    }
+    private void tapQuestionFixtureView(String tag) {
+        android.graphics.Rect bounds = new android.graphics.Rect();
+        instrumentation.runOnMainSync(() -> bounds.set(questionFixtureScreenBounds(questionFixtureView(tag))));
+        android.app.UiAutomation automation = instrumentation.getUiAutomation(android.app.UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES);
+        long time = android.os.SystemClock.uptimeMillis();
+        MotionEvent down = MotionEvent.obtain(time, time, MotionEvent.ACTION_DOWN, bounds.centerX(), bounds.centerY(), 0);
+        MotionEvent up = MotionEvent.obtain(time, time + 60, MotionEvent.ACTION_UP, bounds.centerX(), bounds.centerY(), 0);
+        down.setSource(InputDevice.SOURCE_TOUCHSCREEN); up.setSource(InputDevice.SOURCE_TOUCHSCREEN);
+        try { assertTrue(automation.injectInputEvent(down, true)); assertTrue(automation.injectInputEvent(up, true)); }
+        finally { down.recycle(); up.recycle(); }
+        instrumentation.waitForIdleSync();
+    }
+    private android.graphics.Rect questionFixtureScreenBounds(View view) {
+        android.graphics.Rect bounds = new android.graphics.Rect(); assertTrue(view.getLocalVisibleRect(bounds));
+        int[] origin = new int[2]; view.getLocationOnScreen(origin); bounds.offset(origin[0], origin[1]); return bounds;
+    }
+    private android.graphics.Rect awaitFixtureKeyboard(android.app.UiAutomation automation) throws Exception {
+        long deadline = android.os.SystemClock.elapsedRealtime() + 8000;
+        long firstSeen = 0, stableSince = 0;
+        android.graphics.Rect previous = null;
+        while (android.os.SystemClock.elapsedRealtime() < deadline) {
+            android.graphics.Rect current = fixtureKeyboardBounds(automation);
+            long now = android.os.SystemClock.elapsedRealtime();
+            if (current == null) { previous = null; firstSeen = 0; stableSince = 0; }
+            else {
+                if (firstSeen == 0) firstSeen = now;
+                if (!current.equals(previous)) { previous = current; stableSince = now; }
+                if (now - firstSeen >= 1500 && now - stableSince >= 700) {
+                    instrumentation.waitForIdleSync();
+                    android.graphics.Rect checked = fixtureKeyboardBounds(automation);
+                    if (current.equals(checked)) return checked;
+                    previous = checked; stableSince = android.os.SystemClock.elapsedRealtime();
+                }
+            }
+            Thread.sleep(100);
+        }
+        throw new AssertionError("The question input did not open a settled software keyboard; last bounds=" + previous);
+    }
+    private android.graphics.Rect fixtureKeyboardBounds(android.app.UiAutomation automation) {
+        android.graphics.Rect keyboard = null;
+        for (android.view.accessibility.AccessibilityWindowInfo window : automation.getWindows()) {
+            try {
+                if (window.getType() != android.view.accessibility.AccessibilityWindowInfo.TYPE_INPUT_METHOD) continue;
+                android.graphics.Rect bounds = new android.graphics.Rect(); window.getBoundsInScreen(bounds);
+                if (!bounds.isEmpty()) { if (keyboard == null) keyboard = bounds; else keyboard.union(bounds); }
+            } finally { window.recycle(); }
+        }
+        return keyboard;
+    }
+    private void assertQuestionControlsAboveFixtureKeyboard(android.graphics.Rect keyboard) {
+        for (View control : List.of(questionFixtureView("phone-question-input-answer"), questionFixtureView("phone-question-submit"),
+            Objects.requireNonNull(findText((View)overlayFixtureValue(overlay(), "view"), "停止")))) {
+            android.graphics.Rect bounds = questionFixtureScreenBounds(control);
+            assertEquals("The complete input or control must remain visible above IME " + keyboard + "; visible=" + bounds,
+                control.getHeight(), bounds.height());
+            assertTrue("The input, Stop and Send must remain above settled IME " + keyboard + "; control=" + bounds,
+                bounds.bottom <= keyboard.top);
         }
     }
     private PhoneProgressOverlay progressCaptions() {

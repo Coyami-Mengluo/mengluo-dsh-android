@@ -22,7 +22,7 @@ export function createTransport(endpoint, token) {
         } catch { reject(new Error('Invalid native phone result')); }
       });
     });
-    request.setTimeout(105_000, () => request.destroy(new Error('Native phone confirmation timed out')));
+    request.setTimeout(message.op === 'ask' ? 10 * 60_000 : 105_000, () => request.destroy(new Error('Native phone confirmation timed out')));
     request.on('error', () => reject(new Error('Native phone request interrupted; do not repeat consequential actions automatically')));
     request.end(body);
   });
