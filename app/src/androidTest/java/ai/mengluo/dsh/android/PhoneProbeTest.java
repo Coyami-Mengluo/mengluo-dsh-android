@@ -1137,14 +1137,31 @@ public class PhoneProbeTest {
                 (bounds.getInt(1) + bounds.getInt(3)) / 2, display).put("target", "Increment test counter");
             // Pause through the real UI; there is no model-accessible resume method.
             instrumentation.runOnMainSync(() -> ((ImageButton)overlayFixtureValue(overlay(), "icon")).performClick());
-            instrumentation.waitForIdleSync(); clickOverlayButton("查看对话 · 暂停操作");
+            instrumentation.waitForIdleSync();
+            instrumentation.runOnMainSync(() -> {
+                View review = findText((View)overlayFixtureValue(overlay(), "view"), "查看对话 · 暂停操作"); assertNotNull(review);
+                assertTrue(review.performClick());
+                assertFalse("Exercise the frame before the new review window attaches", overlay().attached());
+                JSONObject paused = immediateFixtureRequest("observe", lease);
+                assertEquals(paused.toString(), "paused", paused.optString("status"));
+                assertTrue("A window transition must not revoke the grant", control.state.live());
+            });
             assertTrue(control.reviewing());
             assertTrue(rpc(new JSONObject().put("op", "status").put("lease", lease)).getBoolean("paused"));
             assertEquals("paused", rpc(tap).getString("status"));
             assertEquals("Count: 0", revisionFixtureCommand("count").getString("count"));
             saveFixtureProgressImage(automation, "phone-progress-review.png");
             Thread.sleep(2100); assertTrue("Review must not auto-collapse", control.reviewing());
-            clickOverlayButton("收起并继续"); assertFalse(control.reviewing());
+            instrumentation.runOnMainSync(() -> {
+                View resume = findText((View)overlayFixtureValue(overlay(), "view"), "收起并继续"); assertNotNull(resume);
+                assertTrue(resume.performClick());
+                assertFalse("Exercise the frame before the restored handle attaches", overlay().attached());
+                JSONObject settling = immediateFixtureRequest("observe", lease);
+                assertEquals(settling.toString(), "screen_changed", settling.optString("status"));
+                assertFalse(settling.optBoolean("actionDispatched", true));
+                assertTrue(control.state.live());
+            });
+            instrumentation.waitForIdleSync(); assertFalse(control.reviewing());
             JSONObject old = rpc(tap); assertEquals(old.toString(), "stale_screenshot", old.getString("status"));
             assertFalse(old.getBoolean("actionDispatched"));
             assertEquals("Count: 0", revisionFixtureCommand("count").getString("count"));
@@ -1191,6 +1208,16 @@ public class PhoneProbeTest {
     private PhoneProgressOverlay progressCaptions() {
         try { java.lang.reflect.Field field = PhoneControl.class.getDeclaredField("captions"); field.setAccessible(true); return (PhoneProgressOverlay)field.get(control); }
         catch (ReflectiveOperationException error) { throw new AssertionError(error); }
+    }
+    private JSONObject immediateFixtureRequest(String op, String lease) {
+        assertEquals("ai.mengluo.dsh.android.phoneprobe", context.getPackageName());
+        try {
+            java.lang.reflect.Method handle = PhoneControl.class.getDeclaredMethod("handle", JSONObject.class, CompletableFuture.class);
+            handle.setAccessible(true); CompletableFuture<JSONObject> response = new CompletableFuture<>();
+            handle.invoke(control, new JSONObject().put("op", op).put("owner", owner).put("lease", lease).put("requestId", UUID.randomUUID().toString()), response);
+            assertTrue("The transition must return without dispatch", response.isDone());
+            return response.getNow(null);
+        } catch (ReflectiveOperationException | JSONException error) { throw new AssertionError(error); }
     }
     private View progressCaptionView() {
         try { java.lang.reflect.Field field = PhoneProgressOverlay.class.getDeclaredField("view"); field.setAccessible(true); return (View)field.get(progressCaptions()); }

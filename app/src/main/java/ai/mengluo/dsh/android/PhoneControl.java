@@ -215,11 +215,14 @@ final class PhoneControl {
             pending = response; activateTask(owner, state.lease()); return;
         }
         if (!state.allowed(owner, lease)) { response.complete(result(state.phase(owner).equals("active") ? "invalid_lease" : state.phase(owner))); return; }
-        if (!ready()) { stopNow("permission_lost"); response.complete(result("permission_lost")); return; }
+        if (!environmentReady()) { stopNow("permission_lost"); response.complete(result("permission_lost")); return; }
         if (reviewing) {
             response.complete(result("paused").put("actionDispatched", false)
                 .put("instruction", "The human is reviewing the conversation. Wait for the native Resume control; do not retry actions or dismiss the panel. After resuming, observe or screenshot again.")); return;
         }
+        // Review transitions replace the window until the next traversal. A missing
+        // attachment during that frame is not a revoked system permission.
+        if (!overlay.attached()) { response.complete(result("screen_changed")); return; }
         if (pending != null) { response.complete(result("busy")); return; }
         if (Set.of("observe", "action", "screenshot", "tap", "gesture").contains(op)) {
             if (!captions.hide()) { response.complete(result("progress_ui_unavailable").put("actionDispatched", false)); return; }
@@ -251,7 +254,8 @@ final class PhoneControl {
             // before planning touches, inspecting accessibility windows or capturing pixels.
             main.postDelayed(() -> {
                 if (pending != response) return;
-                if (!state.allowed(owner, lease) || !ready()) { stopNow("permission_lost"); return; }
+                if (!state.allowed(owner, lease) || !environmentReady()) { stopNow("permission_lost"); return; }
+                if (!overlay.attached()) { pending = null; response.complete(result("screen_changed")); return; }
                 pending = null; handleOperation(input, response, op, owner, lease);
             }, 120);
         } else handleOperation(input, response, op, owner, lease);
@@ -344,7 +348,8 @@ final class PhoneControl {
         } catch (IllegalArgumentException error) { response.complete(PhoneAccess.rejected(error)); }
         catch (Exception error) { response.complete(result("action_failed")); }
     }
-    private boolean ready() { return runtime && state.expired(SystemClock.elapsedRealtime()).isEmpty() && enabled() && PhoneAccess.connected != null && PhoneAccess.connected.unlocked() && Settings.canDrawOverlays(context) && overlay.attached(); }
+    private boolean environmentReady() { return runtime && state.expired(SystemClock.elapsedRealtime()).isEmpty() && enabled() && PhoneAccess.connected != null && PhoneAccess.connected.unlocked() && Settings.canDrawOverlays(context); }
+    private boolean ready() { return environmentReady() && overlay.attached(); }
     private void armDeadline(String owner, String lease, CompletableFuture<JSONObject> value) {
         Runnable timeout = () -> { if (pending == value && state.matches(owner, lease)) stopNow("confirmation_timeout"); };
         main.postDelayed(timeout, 90_000);
