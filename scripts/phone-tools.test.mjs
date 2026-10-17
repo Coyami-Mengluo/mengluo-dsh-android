@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { installTools, ownerFor } from '../app/src/main/assets/phone/plugin.mjs';
+import { installTools, ownerFor, publicConversation } from '../app/src/main/assets/phone/plugin.mjs';
 import { createTransport } from '../app/src/main/assets/phone/transport.mjs';
 
 function fixture(rpc, attachments) {
@@ -14,6 +14,55 @@ function fixture(rpc, attachments) {
   return { tools, notices, agent, ctx, controller, plugin,
     call: (name, args = {}) => tools.get(name).execute(args, { agent, signal: controller.signal }), close: () => effects.forEach(fn => fn()) };
 }
+test('progress shares only bounded public text from the current human turn', () => {
+  const user = (id, text) => ({ type: 'user/message', data: { id, source: { kind: 'user' }, content: [{ type: 'text', text }] } });
+  const events = [user('old', 'old task'), { type: 'assistant/message', data: { message: { id: 'old-reply', content: [{ type: 'text', text: 'old reply' }] } } },
+    user('now', 'current task'), { type: 'assistant/message', data: { message: { id: 'reply', content: [
+      { type: 'reasoning', text: 'private reasoning' }, { type: 'tool-call', arguments: 'private tool input' },
+      { type: 'text', text: 'public reply' }, { type: 'image', data: 'private image' }] } } },
+    { type: 'user/message', data: { id: 'notice', source: { kind: 'plugin:example' }, content: [{ type: 'text', text: 'plugin notice' }] } }];
+  const agent = { session: { snapshotEvents: () => events } };
+  assert.deepEqual(publicConversation(agent), [{ id: 'now', role: 'user', text: 'current task' }, { id: 'reply', role: 'assistant', text: 'public reply' }]);
+  for (let i = 0; i < 40; i++) events.push({ type: 'assistant/message', data: { message: { id: 'r' + i, content: [{ type: 'text', text: '中'.repeat(3000) }] } } });
+  const bounded = publicConversation(agent);
+  assert.equal(bounded.length, 4); assert.ok(bounded.every(m => m.text.length <= 800));
+  assert.ok(Buffer.byteLength(JSON.stringify({ op: 'status', owner: 'a'.repeat(64), lease: 'b'.repeat(36), conversation: bounded })) < 16_384);
+});
+test('review waits for native Resume and never replays a pending touch', async () => {
+  const calls = []; let paused = true;
+  const f = fixture(async request => {
+    calls.push(request);
+    return request.op === 'begin' ? { status: 'active', lease: 'lease' }
+      : request.op === 'status' ? { status: 'active', paused }
+      : { status: 'paused', actionDispatched: false };
+  });
+  try {
+    await f.call('phone_begin', { purpose: 'fixture' });
+    let done = false;
+    const touch = f.call('phone_tap', { screenshot: 'old', x: 10, y: 20, target: 'test' }).then(value => { done = true; return value; });
+    await new Promise(resolve => setTimeout(resolve, 900));
+    assert.equal(done, false); assert.equal(calls.filter(r => r.op === 'tap').length, 1);
+    paused = false; const result = await touch;
+    assert.equal(result.status, 'screen_changed'); assert.equal(result.actionDispatched, false);
+    assert.equal(calls.filter(r => r.op === 'tap').length, 1);
+  } finally { f.close(); }
+});
+test('Stop while reviewing ends the invocation without a later click', async () => {
+  let status = 'active'; const calls = [];
+  const f = fixture(async request => {
+    calls.push(request.op);
+    return request.op === 'begin' ? { status: 'active', lease: 'lease' }
+      : request.op === 'status' ? { status, paused: true } : { status: 'paused' };
+  });
+  try {
+    await f.call('phone_begin', { purpose: 'fixture' });
+    const touch = f.call('phone_tap', { screenshot: 'old', x: 10, y: 20, target: 'test' });
+    status = 'user_cancelled';
+    assert.equal((await touch).status, 'user_cancelled');
+    assert.equal(calls.filter(op => op === 'tap').length, 1);
+    assert.equal((await f.call('phone_begin', { purpose: 'retry' })).status, 'user_cancelled');
+  } finally { f.close(); }
+});
 test('owner comes from the human message, never model/plugin context', () => {
   const f = fixture(async () => ({ status: 'idle' }));
   try {

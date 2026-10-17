@@ -2,8 +2,8 @@
 gradle.beforeProject { project ->
     project.pluginManager.withPlugin('com.android.application') {
         def probeRoot = project.rootProject.file('.tools/phone-probe')
-        project.layout.buildDirectory.set(new File(probeRoot, 'build'))
         project.androidComponents.finalizeDsl { android ->
+            project.layout.buildDirectory.set(new File(probeRoot, 'build'))
             android.defaultConfig.applicationId = 'ai.mengluo.dsh.android.phoneprobe'
             android.defaultConfig.testApplicationId = 'ai.mengluo.dsh.android.phoneprobe.test'
             android.sourceSets.debug.manifest.srcFile(project.rootProject.file('scripts/phone-probe-manifest.xml'))

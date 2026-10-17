@@ -22,6 +22,10 @@ final class PhoneControl {
     final PhoneControlState state = new PhoneControlState();
     final Handler main = new Handler(Looper.getMainLooper());
     private final PhoneOverlay overlay;
+    private final PhoneProgressOverlay captions;
+    final PhoneProgress progress = new PhoneProgress();
+    private boolean reviewing, taskReady;
+    private CompletableFuture<JSONObject> screenOperation, dispatchedTouch;
     private final SharedPreferences preferences;
     private final Set<String> apps = new HashSet<>();
     private final Set<String> calls = new HashSet<>();
@@ -45,10 +49,29 @@ final class PhoneControl {
         }
     };
     private PhoneControl(Context context) {
-        this.context = context; overlay = new PhoneOverlay(context, this);
+        this.context = context; overlay = new PhoneOverlay(context, this); captions = new PhoneProgressOverlay(context);
         preferences = context.getSharedPreferences("phone-control", Context.MODE_PRIVATE);
     }
     boolean skipActionConfirmation() { return preferences.getBoolean("skip-action-confirmation", false); }
+    boolean reviewing() { return reviewing; }
+    void review() {
+        if (!taskReady || !state.live() || !confirmation.isEmpty() || captureWait != null || reviewing) return;
+        reviewing = true; captions.hide();
+        progress.step("已暂停，正在查看对话");
+        if (PhoneAccess.connected != null) PhoneAccess.connected.clear();
+        // An already dispatched gesture may finish. Preserve its real result instead of claiming it did not run.
+        if (pending != null && pending != dispatchedTouch) {
+            CompletableFuture<JSONObject> interrupted = pending; pending = null;
+            interrupted.complete(result("paused").put("actionDispatched", false));
+        }
+        syncUi();
+    }
+    void resumeFromReview() {
+        if (!reviewing || !state.live()) return;
+        reviewing = false;
+        if (PhoneAccess.connected != null) PhoneAccess.connected.clear();
+        progress.step("已继续，等待重新观察屏幕"); syncUi();
+    }
     /** User-operated native setting. Changing it revokes any pending task instead of approving it. */
     void skipActionConfirmation(boolean enabled) {
         if (Looper.myLooper() != Looper.getMainLooper()) throw new IllegalStateException("Phone settings require main looper");
@@ -121,6 +144,8 @@ final class PhoneControl {
     void stop(String reason) { if (Looper.myLooper() == Looper.getMainLooper()) stopNow(reason); else main.post(() -> stopNow(reason)); }
     private void stopNow(String reason) {
         String closed = state.close(reason);
+        reviewing = false; taskReady = false; dispatchedTouch = null; screenOperation = null;
+        captions.hide(); progress.clear();
         confirmAction = null; confirmation = ""; captureWait = null; apps.clear();
         PhoneCaptureService.stopCapture();
         if (PhoneAccess.connected != null) PhoneAccess.connected.clear();
@@ -153,9 +178,18 @@ final class PhoneControl {
         String expired = state.expired(SystemClock.elapsedRealtime()); if (!expired.isEmpty()) stopNow(expired);
         if (op.equals("status")) {
             state.touch(owner, SystemClock.elapsedRealtime());
+            if (state.allowed(owner, lease)) {
+                JSONArray messages = input.optJSONArray("conversation");
+                if (messages != null) for (int i = 0; i < Math.min(4, messages.length()); i++) {
+                    JSONObject message = messages.optJSONObject(i);
+                    if (message != null) progress.message(message.optString("id"), message.optString("role"), message.optString("text"));
+                }
+                syncUi();
+            }
             response.complete(result(state.phase(owner)).put("accessibilityEnabled", enabled()).put("accessibilityConnected", PhoneAccess.connected != null)
                 .put("overlayPermission", Settings.canDrawOverlays(context)).put("stopVisible", overlay.attached())
                 .put("skipActionConfirmation", skipActionConfirmation())
+                .put("paused", owner.equals(state.owner()) && reviewing)
                 .put("screenshotMode", "full_display").put("maskedOwnOverlay", true).put("imageCoordinateTaps", true)
                 .put("gestures", new JSONArray(List.of("long_press", "swipe")))
                 .put("screenSharingActive", PhoneCaptureService.available())
@@ -177,11 +211,52 @@ final class PhoneControl {
             if (!enabled() || PhoneAccess.connected == null || !Settings.canDrawOverlays(context)) {
                 stopNow("permission_required"); notifyGuide(); response.complete(result("permission_required").put("instruction", "Ask the user to open the phone-control permission page. After granting, wait for a NEW user request; never auto-resume.")); return;
             }
+            progress.begin(purpose); progress.step("正在准备手机操作");
             pending = response; activateTask(owner, state.lease()); return;
         }
         if (!state.allowed(owner, lease)) { response.complete(result(state.phase(owner).equals("active") ? "invalid_lease" : state.phase(owner))); return; }
         if (!ready()) { stopNow("permission_lost"); response.complete(result("permission_lost")); return; }
+        if (reviewing) {
+            response.complete(result("paused").put("actionDispatched", false)
+                .put("instruction", "The human is reviewing the conversation. Wait for the native Resume control; do not retry actions or dismiss the panel. After resuming, observe or screenshot again.")); return;
+        }
         if (pending != null) { response.complete(result("busy")); return; }
+        if (Set.of("observe", "action", "screenshot", "tap", "gesture").contains(op)) {
+            if (!captions.hide()) { response.complete(result("progress_ui_unavailable").put("actionDispatched", false)); return; }
+            pending = response; screenOperation = response;
+            progress.step(switch (op) {
+                case "observe" -> "正在读取界面";
+                case "screenshot" -> "正在观察屏幕";
+                case "tap" -> "正在点击：" + PhoneProgress.limit(input.optString("target"), 80);
+                case "gesture" -> "正在操作：" + PhoneProgress.limit(input.optString("target"), 80);
+                default -> switch (input.optString("action")) {
+                    case "launch" -> "正在打开应用"; case "input" -> "正在输入文字";
+                    case "click" -> "正在点击控件"; case "back" -> "正在返回上一页"; default -> "正在滚动界面";
+                };
+            });
+            response.thenAccept(value -> {
+                if (screenOperation == response) screenOperation = null;
+                if (state.allowed(owner, lease) && !reviewing) {
+                    progress.step(switch (value.optString("status")) {
+                        case "ok" -> "已读取界面，等待 AI 下一步";
+                        case "action_dispatched" -> "动作已发送，等待核对结果";
+                        case "screen_changed", "stale_screenshot" -> "界面已变化，等待重新观察";
+                        case "paused" -> "已暂停，正在查看对话";
+                        default -> "当前步骤未完成，等待 AI 处理";
+                    });
+                }
+                syncUi();
+            });
+            // Removing a window is asynchronous in the system compositor. Let it settle
+            // before planning touches, inspecting accessibility windows or capturing pixels.
+            main.postDelayed(() -> {
+                if (pending != response) return;
+                if (!state.allowed(owner, lease) || !ready()) { stopNow("permission_lost"); return; }
+                pending = null; handleOperation(input, response, op, owner, lease);
+            }, 120);
+        } else handleOperation(input, response, op, owner, lease);
+    }
+    private void handleOperation(JSONObject input, CompletableFuture<JSONObject> response, String op, String owner, String lease) {
         try {
             if (op.equals("finish")) { stopNow("completed"); response.complete(result("completed")); }
             else if (op.equals("observe")) response.complete(PhoneAccess.connected.observe(apps));
@@ -204,6 +279,7 @@ final class PhoneControl {
                     && PhoneActionPolicy.needsActionConfirmation(skipActionConfirmation(), input.optBoolean("ask"),
                         action != null ? action.needsConfirmation() : touch.needsConfirmation());
                 Runnable execute = () -> {
+                    if (pending != response || reviewing) return;
                     if (!state.allowed(owner, lease) || !ready()) { stopNow("permission_lost"); return; }
                     confirmAction = null; confirmation = "";
                     try {
@@ -217,15 +293,18 @@ final class PhoneControl {
                             Runnable timeout = () -> {
                                 if (pending == response && state.allowed(owner, lease)) {
                                     response.complete(result("action_unknown").put("instruction", "Check the screen before any further action; do not blindly retry."));
-                                    pending = null; if (PhoneAccess.connected != null) PhoneAccess.connected.clear(); syncUi();
+                                    pending = null; if (dispatchedTouch == response) dispatchedTouch = null;
+                                    if (PhoneAccess.connected != null) PhoneAccess.connected.clear(); syncUi();
                                 }
                             };
                             main.postDelayed(timeout, 5000); response.whenComplete((value, error) -> main.removeCallbacks(timeout));
                             overlay.whenAttached(() -> pending == response, () -> {
                                 if (pending != response) return;
                                 if (!state.allowed(owner, lease) || !ready()) { stopNow("permission_lost"); return; }
+                                dispatchedTouch = response;
                                 PhoneAccess.connected.touch(touch, Set.copyOf(apps), overlay::screenBounds, needsConfirmation, skipActionConfirmation(), value -> {
-                                    if (state.allowed(owner, lease) && ready()) response.complete(value);
+                                    if (dispatchedTouch == response) dispatchedTouch = null;
+                                    if (state.allowed(owner, lease)) response.complete(value);
                                     else response.complete(result(state.phase(owner)));
                                     if (pending == response) pending = null; syncUi();
                                 });
@@ -245,6 +324,7 @@ final class PhoneControl {
                                 if (!state.allowed(owner, lease) || !ready()) { stopNow("permission_lost"); return; }
                                 main.removeCallbacks(timeout);
                                 PhoneAccess.connected.screenshot(Set.copyOf(apps), overlay::screenBounds, value -> {
+                                    if (pending != response) return;
                                     if (state.allowed(owner, lease) && ready() && value.optString("status").equals("screen_capture_empty") && !PhoneCaptureService.available()) {
                                         requestCapture(owner, lease, response); return;
                                     }
@@ -294,6 +374,7 @@ final class PhoneControl {
             if (!ready()) { stopNow("permission_lost"); return; }
             response.complete(result("active").put("lease", lease).put("allowedApps", new JSONArray(apps))
                 .put("skipActionConfirmation", skipActionConfirmation())); pending = null;
+            taskReady = true; progress.step("手机操作已开始，等待 AI 下一步"); syncUi();
             context.getSystemService(NotificationManager.class).cancel(321);
         });
     }
@@ -341,6 +422,10 @@ final class PhoneControl {
             if (!overlay.show(true, confirmation)) { stopNow("stop_ui_unavailable"); return; }
         } else if (foreground == null) overlay.show(false, ""); else overlay.hide();
         if (foreground != null) foreground.phoneOverlayChanged(state.live() && overlay.attached());
+        if (runtime && state.live() && taskReady && overlay.compact() && !reviewing && screenOperation == null && confirmation.isEmpty()
+            && foreground == null && PhoneAccess.connected != null && PhoneAccess.connected.unlocked()
+            && Settings.canDrawOverlays(context)) captions.show(progress.caption());
+        else captions.hide();
     }
     private void notifyGuide() {
         MainActivity foreground = activity.get();

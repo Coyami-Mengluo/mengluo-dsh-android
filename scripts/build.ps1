@@ -32,7 +32,10 @@ try {
         & "$env:JAVA_HOME\bin\keytool.exe" -genkeypair -keystore '.tools\debug.keystore' -storepass android -alias androiddebugkey -keypass android -dname 'CN=Android Debug,O=Android,C=US' -keyalg RSA -keysize 2048 -validity 10000
         if ($LASTEXITCODE -ne 0) { throw 'Unable to create isolated debug key' }
     }
-    # Separate task histories prevent Gradle from deleting the other ABI's outputs.
-    & '.\.tools\gradle-8.9\bin\gradle.bat' --no-daemon --console=plain --project-cache-dir ".gradle/$Abi" "-PruntimeAbi=$Abi" @proxyArgs @Tasks
+    # Isolate fixture task histories too: switching application IDs otherwise
+    # makes Gradle delete the previous build's APKs as stale task outputs.
+    $isPhoneProbe = @($Tasks | Where-Object { ($_ -replace '\\','/') -match '(^|/)phone-probe\.init\.gradle$' }).Count -gt 0
+    $taskCache = if ($isPhoneProbe) { ".gradle/phone-probe-$Abi" } else { ".gradle/$Abi" }
+    & '.\.tools\gradle-8.9\bin\gradle.bat' --no-daemon --console=plain --project-cache-dir $taskCache "-PruntimeAbi=$Abi" @proxyArgs @Tasks
     exit $LASTEXITCODE
 } finally { Pop-Location }

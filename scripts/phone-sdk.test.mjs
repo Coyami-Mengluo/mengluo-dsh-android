@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 import { resolve, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { mkdtempSync, mkdirSync } from 'node:fs';
-import { installTools, installSkill, ownerFor, inject } from '../app/src/main/assets/phone/plugin.mjs';
+import { installTools, installSkill, ownerFor, publicConversation, inject } from '../app/src/main/assets/phone/plugin.mjs';
 
 // Opt-in: use a separately installed official SDK; never install into a user's Harness slot.
 const sdk = process.env.MENG_LUO_HARNESS_SDK;
@@ -162,6 +162,8 @@ test('real agent loop and V4 persistence survive Stop and accept the next human 
     assert.equal(ends.length, 1); assert.equal(ends[0].data.reason.kind, 'completed');
     assert.ok(JSON.stringify(requests.at(-1)).includes('user_cancelled'), 'The model must receive the cancellation');
     send('A new message after Stop'); await agent.whenIdle();
+    assert.deepEqual(publicConversation(agent).map(({ role, text }) => ({ role, text })), [
+      { role: 'user', text: 'A new message after Stop' }, { role: 'assistant', text: '新消息正常处理。' }]);
     ends = agent.session.snapshotEvents().filter(event => event.type === 'turn/end');
     assert.equal(ends.length, 2); assert.ok(ends.every(event => event.data.reason.kind === 'completed'));
     await ctx.sessionPersistence.flush();

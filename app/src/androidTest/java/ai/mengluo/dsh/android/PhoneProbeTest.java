@@ -1092,6 +1092,119 @@ public class PhoneProbeTest {
             assertFalse("Stop must release the projection", PhoneCaptureService.available());
         }
     }
+    @Test public void progressReviewDoesNotInterceptOrReplayFixtureActions() throws Exception {
+        Assume.assumeTrue("Requires explicit isolated-test permissions",
+            "true".equals(InstrumentationRegistry.getArguments().getString("allowPhoneFixture")));
+        long deadline = android.os.SystemClock.elapsedRealtime() + 120000;
+        while ((!control.enabled() || PhoneAccess.connected == null || !Settings.canDrawOverlays(context))
+            && android.os.SystemClock.elapsedRealtime() < deadline) Thread.sleep(200);
+        assertTrue(Settings.canDrawOverlays(context)); assertTrue(control.enabled()); assertNotNull(PhoneAccess.connected);
+        String fixture = "ai.mengluo.dsh.android.phoneprobe.test";
+        android.app.UiAutomation automation = instrumentation.getUiAutomation(android.app.UiAutomation.FLAG_DONT_SUPPRESS_ACCESSIBILITY_SERVICES);
+        // Shell foregrounding is needed on the selected OriginOS ROM. Only launch our fixture.
+        try (InputStream input = new android.os.ParcelFileDescriptor.AutoCloseInputStream(automation.executeShellCommand(
+            "am start -W -n " + fixture + "/ai.mengluo.dsh.android.PhoneFixtureActivity --ez revisionFixture true"))) {
+            assertTrue(new String(IO.bytes(input), StandardCharsets.UTF_8).contains("Status: ok"));
+        }
+        boolean originalSkip = control.skipActionConfirmation();
+        instrumentation.runOnMainSync(() -> control.skipActionConfirmation(true));
+        try {
+            JSONObject begun = rpc(new JSONObject().put("op", "begin").put("purpose", "验证进度字幕、暂停查看和继续操作"));
+            assertEquals(begun.toString(), "active", begun.getString("status")); String lease = begun.getString("lease");
+            JSONArray messages = new JSONArray().put(new JSONObject().put("id", "user").put("role", "user").put("text", "请在测试页增加计数"))
+                .put(new JSONObject().put("id", "assistant").put("role", "assistant").put("text", "我先观察测试界面，然后点击计数按钮。"));
+            rpc(new JSONObject().put("op", "status").put("lease", lease).put("conversation", messages));
+            instrumentation.waitForIdleSync();
+            instrumentation.runOnMainSync(() -> {
+                assertTrue(progressCaptions().visible());
+                WindowManager.LayoutParams params = (WindowManager.LayoutParams)progressCaptionView().getLayoutParams();
+                assertTrue((params.flags & WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE) != 0);
+                assertTrue((params.flags & WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE) != 0);
+                assertTrue(params.alpha <= .8f);
+                assertTrue(control.progress.conversation().contains("我先观察测试界面"));
+            });
+            // Save real display pixels, only while the isolated fixture is foreground.
+            saveFixtureProgressImage(automation, "phone-progress-caption.png");
+            JSONObject tree = rpc(new JSONObject().put("op", "observe").put("lease", lease));
+            assertEquals(tree.toString(), "ok", tree.getString("status"));
+            JSONArray bounds = boundsWithText(tree, "Increment test counter");
+            android.graphics.Point display = new android.graphics.Point();
+            context.getSystemService(WindowManager.class).getDefaultDisplay().getRealSize(display);
+            JSONObject shot = screenshot(lease);
+            File output = new File(context.getExternalFilesDir(null), "phone-progress-model-screenshot.jpg");
+            try (OutputStream stream = new FileOutputStream(output)) { stream.write(android.util.Base64.decode(shot.getString("image"), android.util.Base64.DEFAULT)); }
+            JSONObject tap = at("tap", shot, lease, (bounds.getInt(0) + bounds.getInt(2)) / 2,
+                (bounds.getInt(1) + bounds.getInt(3)) / 2, display).put("target", "Increment test counter");
+            // Pause through the real UI; there is no model-accessible resume method.
+            instrumentation.runOnMainSync(() -> ((ImageButton)overlayFixtureValue(overlay(), "icon")).performClick());
+            instrumentation.waitForIdleSync(); clickOverlayButton("查看对话 · 暂停操作");
+            assertTrue(control.reviewing());
+            assertTrue(rpc(new JSONObject().put("op", "status").put("lease", lease)).getBoolean("paused"));
+            assertEquals("paused", rpc(tap).getString("status"));
+            assertEquals("Count: 0", revisionFixtureCommand("count").getString("count"));
+            saveFixtureProgressImage(automation, "phone-progress-review.png");
+            Thread.sleep(2100); assertTrue("Review must not auto-collapse", control.reviewing());
+            clickOverlayButton("收起并继续"); assertFalse(control.reviewing());
+            JSONObject old = rpc(tap); assertEquals(old.toString(), "stale_screenshot", old.getString("status"));
+            assertFalse(old.getBoolean("actionDispatched"));
+            assertEquals("Count: 0", revisionFixtureCommand("count").getString("count"));
+            JSONObject fresh = screenshot(lease);
+            int targetY = (bounds.getInt(1) + bounds.getInt(3)) / 2;
+            instrumentation.waitForIdleSync();
+            instrumentation.runOnMainSync(() -> {
+                // Deliberately cover the target: the real native path must remove
+                // captions before hit testing and dispatch, not merely rely on placement.
+                View caption = progressCaptionView(); assertNotNull(caption);
+                int[] at = new int[2]; caption.getLocationOnScreen(at);
+                WindowManager.LayoutParams params = (WindowManager.LayoutParams)caption.getLayoutParams();
+                params.y += targetY - at[1] - caption.getHeight() / 2;
+                caption.getContext().getSystemService(WindowManager.class).updateViewLayout(caption, params);
+            });
+            instrumentation.waitForIdleSync();
+            JSONObject executed = rpc(at("tap", fresh, lease, (bounds.getInt(0) + bounds.getInt(2)) / 2,
+                targetY, display).put("target", "Increment test counter"));
+            assertEquals(executed.toString(), "action_dispatched", executed.getString("status"));
+            Thread.sleep(200); assertEquals("Count: 1", revisionFixtureCommand("count").getString("count"));
+            JSONObject hold = rpc(at("gesture", screenshot(lease), lease, (bounds.getInt(0) + bounds.getInt(2)) / 2,
+                targetY, display).put("gesture", "long_press").put("durationMs", 800).put("target", "Long press test counter"));
+            assertEquals(hold.toString(), "action_dispatched", hold.getString("status"));
+            JSONObject observed = rpc(new JSONObject().put("op", "observe").put("lease", lease));
+            assertTrue(observed.toString().contains("Long presses: 1"));
+            JSONArray pad = boundsWithText(observed, "Gesture pad");
+            JSONObject swipeShot = screenshot(lease);
+            JSONObject swipe = at("gesture", swipeShot, lease, pad.getInt(0) + (pad.getInt(2) - pad.getInt(0)) / 4,
+                (pad.getInt(1) + pad.getInt(3)) / 2, display).put("gesture", "swipe").put("durationMs", 350)
+                .put("endX", (pad.getInt(0) + (pad.getInt(2) - pad.getInt(0)) * 3 / 4) * swipeShot.getInt("width") / display.x)
+                .put("endY", ((pad.getInt(1) + pad.getInt(3)) / 2) * swipeShot.getInt("height") / display.y).put("target", "Swipe test pad");
+            JSONObject swiped = rpc(swipe); assertEquals(swiped.toString(), "action_dispatched", swiped.getString("status"));
+            assertTrue(rpc(new JSONObject().put("op", "observe").put("lease", lease)).toString().contains("Swipes: 1"));
+            instrumentation.runOnMainSync(() -> ((ImageButton)overlayFixtureValue(overlay(), "icon")).performClick());
+            instrumentation.waitForIdleSync(); clickOverlayButton("查看对话 · 暂停操作");
+            clickOverlayButton("停止"); assertFalse(control.state.live()); assertFalse(control.reviewing());
+            assertFalse(control.progress.conversation().contains("我先观察测试界面"));
+            assertEquals("user_cancelled", rpc(tap).getString("status"));
+            assertEquals("Count: 1", revisionFixtureCommand("count").getString("count"));
+        } finally {
+            instrumentation.runOnMainSync(() -> { control.stop("user_cancelled"); control.skipActionConfirmation(originalSkip); });
+        }
+    }
+    private PhoneProgressOverlay progressCaptions() {
+        try { java.lang.reflect.Field field = PhoneControl.class.getDeclaredField("captions"); field.setAccessible(true); return (PhoneProgressOverlay)field.get(control); }
+        catch (ReflectiveOperationException error) { throw new AssertionError(error); }
+    }
+    private View progressCaptionView() {
+        try { java.lang.reflect.Field field = PhoneProgressOverlay.class.getDeclaredField("view"); field.setAccessible(true); return (View)field.get(progressCaptions()); }
+        catch (ReflectiveOperationException error) { throw new AssertionError(error); }
+    }
+    private void saveFixtureProgressImage(android.app.UiAutomation automation, String name) throws Exception {
+        instrumentation.runOnMainSync(() -> assertEquals("ai.mengluo.dsh.android.phoneprobe.test", PhoneAccess.connected.foreground()));
+        // waitForIdleSync only drains the app looper, not SurfaceFlinger's pending
+        // window transaction; capture the settled visual state on physical devices.
+        Thread.sleep(350);
+        android.graphics.Bitmap image = automation.takeScreenshot(); assertNotNull(image);
+        try (OutputStream output = new FileOutputStream(new File(context.getExternalFilesDir(null), name))) { image.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, output); }
+        finally { image.recycle(); }
+    }
     private JSONObject screenshot(String lease) throws Exception {
         Thread.sleep(350);
         Future<JSONObject> capture = worker.submit(() -> rpc(new JSONObject().put("op", "screenshot").put("lease", lease)));

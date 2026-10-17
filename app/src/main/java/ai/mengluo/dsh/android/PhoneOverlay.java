@@ -20,20 +20,21 @@ final class PhoneOverlay {
     private View view;
     private WindowManager.LayoutParams position;
     private String rendering = "";
-    private boolean active, collapsed, awaitingConfirmation;
+    private boolean active, collapsed, awaitingConfirmation, reviewing;
     private ImageButton icon;
     private TextView statusText;
-    private Button stopButton;
+    private Button stopButton, reviewButton;
+    private TextView conversationText, stepsText;
     private int expandedWidth, ordinaryY, appliedX, appliedY, appliedWidth;
     private final List<LayoutWait> layoutWaits = new ArrayList<>();
     private final Runnable collapse = this::collapseNow;
     private void collapseNow() {
-        if (view == null || awaitingConfirmation) return;
+        if (view == null || awaitingConfirmation || reviewing) return;
         setCollapsed(true);
     }
     private void scheduleCollapse() {
         main.removeCallbacks(collapse);
-        if (view != null && !awaitingConfirmation) main.postDelayed(collapse, 2000);
+        if (view != null && !awaitingConfirmation && !reviewing) main.postDelayed(collapse, 2000);
     }
     private void setCollapsed(boolean value) {
         if (view == null) return;
@@ -43,13 +44,15 @@ final class PhoneOverlay {
         view.setAlpha(value ? .85f : 1f);
         if (statusText != null) statusText.setVisibility(value ? View.GONE : View.VISIBLE);
         if (stopButton != null) stopButton.setVisibility(value ? View.GONE : View.VISIBLE);
+        if (reviewButton != null) reviewButton.setVisibility(value ? View.GONE : View.VISIBLE);
         PhoneOverlayGeometry.IconBox iconBox = applyIconGeometry(value);
-        icon.setContentDescription(active && value ? "手机操作中，展开停止按钮" : "返回 MengLuo");
+        icon.setContentDescription(active ? value ? "手机操作中，展开对话和停止按钮" : "查看对话并暂停手机操作" : "返回 MengLuo");
         // Resize the child with the window: a 52dp child inside a narrow window
         // is clipped, not scaled, even when its ImageView uses FIT_CENTER.
         position.width = value ? iconBox.width() : expandedWidth;
         position.x = safeBounds().right - position.width - (value ? 0 : ui.dp(6));
         view.requestLayout(); update();
+        if (attached()) control.syncUi();
     }
     private PhoneOverlayGeometry.IconBox applyIconGeometry(boolean compact) {
         PhoneOverlayGeometry.IconBox box = PhoneOverlayGeometry.icon(compact, context.getResources().getDisplayMetrics().density);
@@ -63,6 +66,7 @@ final class PhoneOverlay {
         this.control = control; manager = this.context.getSystemService(WindowManager.class); ui = new Ui(this.context);
     }
     boolean attached() { return view != null && view.isAttachedToWindow(); }
+    boolean compact() { return attached() && collapsed; }
     PhoneScreenPolicy.Box screenBounds() {
         if (!attached() || view.getWidth() <= 0 || view.getHeight() <= 0) return null;
         int[] location = new int[2]; view.getLocationOnScreen(location);
@@ -108,17 +112,18 @@ final class PhoneOverlay {
     boolean show(boolean controlling, String confirmation) {
         Rect bounds = safeBounds();
         boolean rainbow = control.skipActionConfirmation();
-        String next = controlling + ":" + confirmation + ":" + rainbow + ":" + context.getResources().getConfiguration().uiMode + ":" + bounds.width() + "x" + bounds.height();
+        boolean review = controlling && control.reviewing();
+        String next = controlling + ":" + confirmation + ":" + rainbow + ":" + review + ":" + context.getResources().getConfiguration().uiMode + ":" + bounds.width() + "x" + bounds.height();
         // addView attaches on the next UI traversal; do not tear it down while that is pending.
-        if (next.equals(rendering) && view != null) return true;
+        if (next.equals(rendering) && view != null) { updateConversation(); return true; }
         int oldY = position == null ? ui.dp(180) : position.y;
-        if (view != null && active && !awaitingConfirmation && !confirmation.isEmpty()) ordinaryY = oldY;
-        if (view != null && active && awaitingConfirmation && confirmation.isEmpty()) oldY = ordinaryY;
+        if (view != null && active && !awaitingConfirmation && !reviewing && (!confirmation.isEmpty() || review)) ordinaryY = oldY;
+        if (view != null && active && (awaitingConfirmation || reviewing) && confirmation.isEmpty() && !review) oldY = ordinaryY;
         // Ordinary watchdog/action updates must not re-open the pill or restart its timer.
         // Dismissing confirmation immediately restores the edge handle before a pending touch.
-        boolean resumeCollapsed = view != null && controlling && active && (collapsed || awaitingConfirmation) && confirmation.isEmpty();
-        hide(); active = controlling; rendering = next; collapsed = false; awaitingConfirmation = !confirmation.isEmpty();
-        LinearLayout body = controlling ? new PhoneOverlayFrame(context, awaitingConfirmation, rainbow) : ui.column(0);
+        boolean resumeCollapsed = view != null && controlling && active && (collapsed || awaitingConfirmation || reviewing) && confirmation.isEmpty() && !review;
+        hide(); active = controlling; rendering = next; collapsed = false; awaitingConfirmation = !confirmation.isEmpty(); reviewing = review;
+        LinearLayout body = controlling ? new PhoneOverlayFrame(context, awaitingConfirmation || reviewing, rainbow) : ui.column(0);
         body.setElevation(ui.dp(8));
         body.setBackground(ui.rounded(ui.color(R.color.surface), controlling ? 24 : 28)); body.setClipToOutline(true);
         LinearLayout row = new LinearLayout(context); row.setGravity(Gravity.CENTER_VERTICAL);
@@ -132,17 +137,28 @@ final class PhoneOverlay {
                 // The edge handle is the way back to Stop, not a forced app switch.
                 if (active) return;
             }
+            if (active) { control.review(); return; }
             scheduleCollapse();
             context.startActivity(new Intent(context, MainActivity.class).setAction(PhoneControl.MENU).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_SINGLE_TOP));
         });
         if (controlling) {
-            statusText = ui.text(confirmation.isEmpty() ? "手机操作中" : "等待你确认", 14, true);
+            statusText = ui.text(reviewing ? "已暂停 · 查看对话" : confirmation.isEmpty() ? "手机操作中" : "等待你确认", 14, true);
             row.addView(statusText, new LinearLayout.LayoutParams(0, -2, 1));
             stopButton = ui.button("停止", 0, false, () -> control.stop("user_cancelled")); stopButton.setFilterTouchesWhenObscured(true);
             stopButton.setTextColor(ui.color(R.color.danger)); row.addView(stopButton, new LinearLayout.LayoutParams(-2, -2));
         }
         body.addView(row);
-        if (!confirmation.isEmpty()) {
+        if (reviewing) {
+            ScrollView scroll = new ScrollView(context); LinearLayout details = ui.column(0);
+            details.addView(ui.caption("本次任务的近期对话与操作记录；长消息显示摘要。"));
+            conversationText = ui.text(control.progress.conversation(), 14, false); details.addView(conversationText);
+            details.addView(ui.caption("操作记录"));
+            stepsText = ui.text(control.progress.steps(), 12, false); details.addView(stepsText);
+            scroll.addView(details);
+            body.addView(scroll, new LinearLayout.LayoutParams(-1, Math.max(ui.dp(100), Math.min(ui.dp(360), safeBounds().height() - ui.dp(180)))));
+            Button resume = ui.button("收起并继续", 0, true, control::resumeFromReview);
+            resume.setFilterTouchesWhenObscured(true); body.addView(resume);
+        } else if (!confirmation.isEmpty()) {
             ScrollView scroll = new ScrollView(context); LinearLayout details = ui.column(0);
             details.addView(ui.text(confirmation, 13, false));
             boolean question = confirmation.startsWith("需要你确认：");
@@ -150,6 +166,9 @@ final class PhoneOverlay {
             Button approve = ui.button(question ? "同意并继续" : "确认这次操作", 0, true, control::approveAction); approve.setFilterTouchesWhenObscured(true); details.addView(approve);
             scroll.addView(details);
             body.addView(scroll, new LinearLayout.LayoutParams(-1, Math.max(ui.dp(80), Math.min(ui.dp(240), safeBounds().height() - ui.dp(100)))));
+        } else if (controlling) {
+            reviewButton = ui.button("查看对话 · 暂停操作", 0, false, control::review);
+            reviewButton.setFilterTouchesWhenObscured(true); body.addView(reviewButton);
         }
         expandedWidth = controlling ? Math.min(ui.dp(330), safeBounds().width() - ui.dp(16)) : ui.dp(52);
         position = new WindowManager.LayoutParams(expandedWidth, -2,
@@ -176,6 +195,7 @@ final class PhoneOverlay {
             }
         });
         view = body;
+        if (controlling) body.setPadding(ui.dp(10), ui.dp(10), ui.dp(10), ui.dp(10));
         if (resumeCollapsed) setCollapsed(true);
         try {
             manager.addView(view, position);
@@ -186,6 +206,10 @@ final class PhoneOverlay {
             });
             view.post(this::update); if (!collapsed) scheduleCollapse(); return true;
         } catch (RuntimeException error) { hide(); return false; }
+    }
+    private void updateConversation() {
+        if (conversationText != null && !conversationText.getText().toString().equals(control.progress.conversation())) conversationText.setText(control.progress.conversation());
+        if (stepsText != null && !stepsText.getText().toString().equals(control.progress.steps())) stepsText.setText(control.progress.steps());
     }
     private Rect safeBounds() {
         WindowMetrics metrics = manager.getCurrentWindowMetrics(); Rect area = new Rect(metrics.getBounds());
@@ -205,8 +229,8 @@ final class PhoneOverlay {
     void hide() {
         for (LayoutWait wait : new ArrayList<>(layoutWaits)) wait.cancel();
         main.removeCallbacks(collapse); View old = view; view = null; rendering = "";
-        active = false; collapsed = false; awaitingConfirmation = false;
-        icon = null; statusText = null; stopButton = null;
+        active = false; collapsed = false; awaitingConfirmation = false; reviewing = false;
+        icon = null; statusText = null; stopButton = null; reviewButton = null; conversationText = null; stepsText = null;
         if (old != null) { try { manager.removeViewImmediate(old); } catch (RuntimeException ignored) { } }
     }
 }

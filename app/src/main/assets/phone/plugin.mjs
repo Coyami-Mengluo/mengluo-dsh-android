@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { setTimeout as delay } from 'node:timers/promises';
 import { createTransport } from './transport.mjs';
 
 export const name = 'mengluo-android-phone';
@@ -54,6 +55,27 @@ export function ownerFor(agent) {
   return human ? createHash('sha256').update(`${agent.id}\0${human.data.id}`).digest('hex') : undefined;
 }
 
+// Only public text from this human turn is shown. Never forward reasoning blocks,
+// tool arguments/results, attachments, system prompts or another session's history.
+export function publicConversation(agent) {
+  const events = typeof agent?.session?.snapshotEvents === 'function' ? agent.session.snapshotEvents() : agent?.session?.events;
+  if (!Array.isArray(events)) return [];
+  const start = events.findLastIndex(event => event.type === 'user/message' && event.data?.source?.kind === 'user');
+  if (start < 0) return [];
+  const messages = [];
+  for (const event of events.slice(start)) {
+    const role = event.type === 'user/message' && event.data?.source?.kind === 'user' ? 'user' : event.type === 'assistant/message' ? 'assistant' : undefined;
+    const message = role === 'assistant' ? event.data?.message : event.data;
+    if (!role || typeof message?.id !== 'string' || !Array.isArray(message.content)) continue;
+    let text = message.content.filter(block => block?.type === 'text' && typeof block.text === 'string').map(block => block.text).join('\n')
+      .replace(/[\u0000-\u0008\u000b-\u001f\u007f]/g, '').trim();
+    if (!text) continue;
+    if (text.length > 800) text = text.slice(0, 798).replace(/[\ud800-\udbff]$/, '') + '…';
+    messages.push({ id: message.id.slice(0, 128), role, text });
+  }
+  return messages.slice(-4);
+}
+
 export function installTools(ctx, rpc, { interval = 1500 } = {}) {
   const sessions = new Map(); let disposed = false;
   let attachmentStore;
@@ -84,8 +106,8 @@ export function installTools(ctx, rpc, { interval = 1500 } = {}) {
     try {
       for (const record of sessions.values()) {
         if (record.ended) continue;
-        if (record.agent.status === 'idle' && record.lease) { await cancel(record); continue; }
-        try { const status = await rpc({ op: 'status', owner: record.owner }, AbortSignal.timeout(5000)); if (TERMINAL.has(status.status)) notify(record, status); }
+        if (ownerFor(record.agent) !== record.owner || (record.agent.status === 'idle' && record.lease)) { await cancel(record); continue; }
+        try { const status = await rpc({ op: 'status', owner: record.owner, lease: record.lease, conversation: publicConversation(record.agent) }, AbortSignal.timeout(5000)); if (TERMINAL.has(status.status)) notify(record, status); }
         catch { await cancel(record, 'bridge_disconnected'); }
       }
     } finally { polling = false; }
@@ -128,7 +150,16 @@ export function installTools(ctx, rpc, { interval = 1500 } = {}) {
           : op === 'gesture' ? { gesture: args?.gesture, screenshot: args?.screenshot, x: args?.x, y: args?.y, endX: args?.endX, endY: args?.endY,
             durationMs: args?.durationMs, target: String(args?.target ?? '').slice(0, 161), ask: args?.ask === true }
           : op === 'ask' ? { question: String(args?.question ?? '').slice(0, 501) } : {};
-        const result = await rpc({ ...fields, op, owner, lease: record?.lease }, exec.signal);
+        let result = await rpc({ ...fields, op, owner, lease: record?.lease }, exec.signal);
+        // Hold this tool invocation while the native review panel is open. Poll only
+        // status; never replay a click, accept a confirmation or resume on a timer.
+        while (result.status === 'paused' && record && !record.ended && !disposed) {
+          await delay(700, undefined, { signal: exec.signal });
+          const status = await rpc({ op: 'status', owner, lease: record.lease, conversation: publicConversation(record.agent) }, exec.signal);
+          if (TERMINAL.has(status.status)) { result = status; break; }
+          if (!status.paused) result = { status: 'screen_changed', actionDispatched: false,
+            instruction: 'The human closed the review panel. This pending operation was NOT executed. Request a NEW phone_observe or phone_screenshot before continuing; never replay old coordinates or node IDs.' };
+        }
         if (record?.ended) return { status: record.terminal, instruction: STOP_INSTRUCTION };
         if (op === 'begin' && result.status === 'active') {
           if (typeof result.lease !== 'string') { await cancel(record, 'bridge_error'); return { status: 'bridge_error' }; }

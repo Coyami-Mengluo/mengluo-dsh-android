@@ -6,6 +6,12 @@ The user selected the connected physical Xiaomi Mi 6 (`sagit`) for this project'
 future device tests. Its OriginOS port reports a vivo model; identify the device
 by the serial in the local `.tools/test-device.json`, not that model string.
 
+The user confirmed this is a dedicated test phone with no personal user data.
+Normal app installation, UI interaction, and temporary accessibility, overlay,
+and screen-sharing permissions for the isolated fixture are authorized; do not
+ask for these permissions again. Restore temporary fixture permissions after
+testing. Keep the existing rule against clearing app data to mask test failures.
+
 - Read `.tools/test-device.json` for `adb`, `serial`, and `abi`. Keep this machine's
   device identifiers and tool paths in that ignored file.
 - Always address the selected device with `adb -s <serial>`. If it is disconnected
